@@ -1,18 +1,16 @@
 # stacker-bot (Big Two AI, v2) — CLAUDE.md
 
 ## Key documents
-- **Architecture plan (the plan):** `~/personal-os/projects/big-two-ai/architecture-plan.md` — scope, home rules, rules of evidence, process, milestones, starting hypotheses
+- **Architecture plan (the plan):** `~/personal-os/projects/big-two-ai/architecture-plan.md` — the spec: scope, home rules, rules of evidence, milestones, starting hypotheses
 - **Research manifest:** [`docs/research-manifest.md`](docs/research-manifest.md) — frozen rules, paths, slug map
 - **Decision log / lab notebook:** `docs/decision-log.md`, `docs/lab-notebook.md`
 - **Stage plans:** `docs/stage-plans/<slug>.md`, one per stage, written when its milestone is reached
 - **Project index:** `~/os/projects/big-two-ai/README.md`
 - **Process standard:** `~/os/knowledge/frameworks/research-standards.md`; code style `research-code-standards.md`
 
-## Who writes what
-Nate writes the core code: engine, legal-move generation, the net, the DMC loop, eval statistics,
-and the first test of each module. Claude explains, reviews, writes the remaining tests, scripts
-and plots, and enforces the plan. Reviews run as fresh-context subagents. No `dt-*` workers.
-One piece (one function) at a time, planned before written, checkpointed after.
+## How code gets written
+Per `/research-partner`: Claude writes, one piece (one function) at a time — planned with Nate
+first, checkpointed by Nate after. Reviews run as fresh-context subagents. No `dt-*` workers.
 
 ## Structure
 ```
@@ -35,7 +33,7 @@ stacker-bot/
   before confirm, negative results kept. Reopening one needs a decision-log entry.
 - **Budget rule:** every run estimate = training + eval, each from a 2-minute probe on the target
   box, re-estimated before launch.
-- **Stage size:** one sitting of Nate's code, ending in a check that fails if the code is wrong.
+- **Stage size:** a stage ends in a check that fails if the code is wrong.
 - **Naming:** nothing tracked in git carries a bare milestone number (`m0_`, `stage1`). Slugs only,
   from the manifest's slug map.
 - **ML verification gate:** any change to model, loss, or data-pipeline code passes the
