@@ -1,0 +1,27 @@
+# Claude Code: CLAUDE.md is tracked, the rest of .claude/ is local
+.claude/
+!CLAUDE.md
+
+# Research docs stay local (manifest, decision log, notebook, stage plans)
+docs/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Training runs: checkpoints, actor logs, buffers. Results tables go in results/ and are tracked.
+runs/*
+!runs/.gitkeep
+*.pt
+*.ckpt
+
+# One-off exploration, never the repo root
+scratch/*
+!scratch/.gitkeep
+
+# Dev deals regenerate from a seed; sealed deals + hashes in data/sealed-deals/ are tracked
+data/dev-deals/
+
+.DS_Store
