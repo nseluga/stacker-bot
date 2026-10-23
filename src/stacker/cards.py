@@ -66,3 +66,84 @@ def build_deck(num_decks):
             for deck in DECK_VALUES_BY_COUNT[num_decks]:
                 cards.append(Card(rank, suit, deck))
     return cards
+
+
+def find_opening(hands):
+    """
+    Finds who leads the first round and the card their opening play must include.
+    hands: list of lists of Cards, one list per seat, as dealt.
+    Returns (leader_seat, opening_card): the lowest dealt card and the seat holding it.
+    Set-aside cards are not in any hand, so if 3♠ is aside the next lowest dealt card leads.
+    With 2 decks the bad copy sorts below the good copy, so the bad copy's holder leads.
+    """
+    leader_seat = None
+    opening_card = None
+    for seat, hand in enumerate(hands):
+        for card in hand:
+            if opening_card is None or card < opening_card:
+                leader_seat = seat
+                opening_card = card
+
+    if opening_card is None:
+        raise ValueError("no cards were dealt")
+    return leader_seat, opening_card
+
+
+class GameConfig(NamedTuple):
+    """How many decks a table uses and how many cards each seat is dealt."""
+
+    num_decks: int
+    hand_size: int
+
+
+# Player count → table setup (architecture plan §2). Cards left after dealing go aside.
+CONFIGS = {
+    3: GameConfig(num_decks=1, hand_size=17),
+    4: GameConfig(num_decks=1, hand_size=13),
+    5: GameConfig(num_decks=1, hand_size=10),
+    6: GameConfig(num_decks=2, hand_size=17),
+    7: GameConfig(num_decks=2, hand_size=14),
+    8: GameConfig(num_decks=2, hand_size=13),
+}
+
+
+class Deal(NamedTuple):
+    """
+    The result of one deal.
+    hands: list of sorted card lists, one per seat (seat 0 first).
+    aside: cards no one was dealt, unseen for the whole game.
+    leader_seat, opening_card: who leads the first round, and the card that decided it.
+    """
+
+    hands: list
+    aside: list
+    leader_seat: int
+    opening_card: Card
+
+
+def deal(num_players, rng):
+    """
+    Shuffle and deal one game for num_players seats.
+    rng is a random.Random the caller owns, so one seed replays the whole game.
+    Seats take consecutive blocks of the shuffled deck. After a uniform shuffle this
+    gives every hand the same odds as dealing one card at a time around the table.
+    """
+    if num_players not in CONFIGS:
+        raise ValueError(f"num_players must be 3 to 8, got {num_players}")
+    config = CONFIGS[num_players]
+
+    deck = build_deck(config.num_decks)
+    rng.shuffle(deck)
+
+    hands = []
+    for seat in range(num_players):
+        start = seat * config.hand_size
+        hand = deck[start : start + config.hand_size]
+        hand.sort()
+        hands.append(hand)
+
+    dealt_count = num_players * config.hand_size
+    aside = deck[dealt_count:]
+
+    leader_seat, opening_card = find_opening(hands)
+    return Deal(hands, aside, leader_seat, opening_card)
