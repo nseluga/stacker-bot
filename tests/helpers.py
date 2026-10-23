@@ -7,6 +7,7 @@ live here and not in the engine.
 """
 
 from stacker.cards import BAD_COPY_MARK, BAD_DECK, GOOD_DECK, RANK_NAMES, Card
+from stacker.patterns import classify
 
 # Suit letters typed in tests, in the same order as SUIT_SYMBOLS (♠ ♣ ♦ ♥).
 SUIT_LETTERS = ("s", "c", "d", "h")
@@ -38,3 +39,8 @@ def parse_cards(text):
         card = Card(RANK_NAMES.index(rank_name), SUIT_LETTERS.index(suit_letter), deck)
         cards.append(card)
     return cards
+
+
+def classify_text(text, num_decks=1, leading=False):
+    """Parse cards written like '3s 4s 5h' and classify them."""
+    return classify(parse_cards(text), num_decks, leading)

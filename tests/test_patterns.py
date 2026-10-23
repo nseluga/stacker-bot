@@ -4,13 +4,8 @@ Tests for pattern recognition (architecture plan §2; stage plan engine_rules, t
 rejected (classify returns None).
 """
 
-from helpers import parse_cards
-from stacker.patterns import BOMB, RUN, SET, Pattern, classify
-
-
-def classify_text(text, num_decks=1, leading=False):
-    """Parse cards written like '3s 4s 5h' and classify them."""
-    return classify(parse_cards(text), num_decks, leading)
+from helpers import classify_text, parse_cards
+from stacker.patterns import BOMB, RUN, SET, Pattern
 
 
 def card(text):

@@ -83,3 +83,30 @@ def classify(cards, num_decks, leading):
     if leading and ranks == [SIX, SEVEN]:
         return Pattern(RUN, group_size, MIN_RUN_RANKS, top_card)
     return None
+
+
+def beats(new, previous):
+    """
+    True if the play `new` beats the play `previous` (both Patterns from classify).
+    A bomb beats any non-bomb. Bomb vs bomb: the bigger group wins, then the higher card.
+    Otherwise the plays must have the same shape (kind, group size, ranks spanned, which
+    together fix the card count) and the higher top card wins. A 6-7 lead is stored as a
+    3-rank run topped by its 7, so it needs no special case here.
+    """
+    if new.kind == BOMB and previous.kind != BOMB:
+        return True
+    if previous.kind == BOMB and new.kind != BOMB:
+        return False
+
+    if new.kind == BOMB and previous.kind == BOMB:
+        if new.group_size != previous.group_size:
+            return new.group_size > previous.group_size
+        return new.top_card > previous.top_card
+
+    if new.kind != previous.kind:
+        return False
+    if new.group_size != previous.group_size:
+        return False
+    if new.num_ranks != previous.num_ranks:
+        return False
+    return new.top_card > previous.top_card
