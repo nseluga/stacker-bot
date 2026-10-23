@@ -1,0 +1,4 @@
+# Test settings only: pytest imports the package from src/ and the test helpers from tests/.
+[tool.pytest.ini_options]
+pythonpath = ["src", "tests"]
+testpaths = ["tests"]
