@@ -6,8 +6,10 @@ letter, and an optional mark for a bad copy. Only tests type cards in, so the su
 live here and not in the engine.
 """
 
+from itertools import combinations
+
 from stacker.cards import BAD_COPY_MARK, BAD_DECK, GOOD_DECK, RANK_NAMES, Card
-from stacker.patterns import classify
+from stacker.patterns import beats, classify
 
 # Suit letters typed in tests, in the same order as SUIT_SYMBOLS (♠ ♣ ♦ ♥).
 SUIT_LETTERS = ("s", "c", "d", "h")
@@ -44,3 +46,29 @@ def parse_cards(text):
 def classify_text(text, num_decks=1, leading=False):
     """Parse cards written like '3s 4s 5h' and classify them."""
     return classify(parse_cards(text), num_decks, leading)
+
+
+def brute_force_plays(hand, num_decks, previous, opening_card):
+    """
+    Slow reference for moves.legal_plays: tries every non-empty subset of the hand.
+    Same inputs as legal_plays. Returns a list of card tuples, lowest card first.
+    Too slow for the game loop (2^n subsets), but plainly correct, so tests compare against it.
+    """
+    leading = previous is None
+    plays = []
+    for size in range(1, len(hand) + 1):
+        for cards in combinations(sorted(hand), size):
+            pattern = classify(list(cards), num_decks, leading)
+            if pattern is None:
+                continue
+            if opening_card is not None and opening_card not in cards:
+                continue
+            if previous is not None and not beats(pattern, previous):
+                continue
+            plays.append(cards)
+    return plays
+
+
+def choose_random(state, actions, rng):
+    """A test agent: picks uniformly among the legal actions, using the hand's own rng."""
+    return rng.choice(actions)
