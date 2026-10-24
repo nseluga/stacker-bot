@@ -67,8 +67,3 @@ def brute_force_plays(hand, num_decks, previous, opening_card):
                 continue
             plays.append(cards)
     return plays
-
-
-def choose_random(state, actions, rng):
-    """A test agent: picks uniformly among the legal actions, using the hand's own rng."""
-    return rng.choice(actions)

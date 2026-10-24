@@ -10,6 +10,8 @@ HandState holds everything the loop needs. It takes the hands directly, so tests
 positions; new_hand builds one from a fresh deal.
 """
 
+from typing import NamedTuple
+
 from stacker.cards import CONFIGS, deal
 from stacker.moves import legal_plays
 
@@ -155,20 +157,89 @@ def points(state):
     return scores
 
 
-def play_hand(num_players, rng, choose_action):
+class Observation(NamedTuple):
     """
-    Deals and plays one full hand, to the 2nd player out.
-    num_players: 3 to 8. rng: the caller's random.Random; it drives the deal and is handed to
-    the agent, so one seed replays the whole hand.
-    choose_action(state, actions, rng) -> one of actions; every seat uses it.
+    What one seat may see at its turn: everything public at a real table, plus its own hand.
+    Other seats' hands and the aside are never in it, so an agent that gets only this cannot cheat.
+    Every field is a tuple or an immutable value, so an agent cannot edit the game through it.
+    seat: the seat to act. hand: that seat's cards.
+    num_decks, table, table_seat, opening_card: as in HandState.
+    passed: one bool per seat. cards_left: one count per seat (public: everyone can count cards).
+    finish_order: seats already out, first out first.
+    history: every (seat, action) so far this hand, in play order.
+    """
+    seat: int
+    hand: tuple
+    num_decks: int
+    table: object
+    table_seat: object
+    passed: tuple
+    cards_left: tuple
+    finish_order: tuple
+    opening_card: object
+    history: tuple
+
+
+def observe(state, history):
+    """
+    Builds the Observation for the seat to act.
+    state: a HandState with turn set. history: the list of (seat, action) played so far; the
+    caller keeps it, because HandState doesn't record past plays.
+    Lists are copied into tuples, so later moves never change an Observation already handed out.
+    """
+    cards_left = []
+    for hand in state.hands:
+        cards_left.append(len(hand))
+
+    return Observation(
+        seat=state.turn,
+        hand=tuple(state.hands[state.turn]),
+        num_decks=state.num_decks,
+        table=state.table,
+        table_seat=state.table_seat,
+        passed=tuple(state.passed),
+        cards_left=tuple(cards_left),
+        finish_order=tuple(state.finish_order),
+        opening_card=state.opening_card,
+        history=tuple(history),
+    )
+
+
+def play_out(state, agents, rng):
+    """
+    Plays an already-dealt hand to the 2nd player out, with one agent per seat.
+    state: a HandState (changed in place). agents: list, agents[seat] acts for that seat.
+    rng: handed to every agent call.
+    Each agent is called as agent(observation, actions, rng) and returns one of actions. It gets
+    only the Observation, never the HandState, so it cannot see other hands.
     Returns (trace, points): trace is the list of (seat, action) in play order, points as above.
+    The trace is also the public history each observation carries, so there is one list, not two.
     The loop always ends: a leader cannot pass, so every round removes at least one card.
     """
-    state = new_hand(num_players, rng)
+    # A wrong-length list would silently seat the wrong agent, so refuse it here.
+    if len(agents) != len(state.hands):
+        raise ValueError(f"{len(agents)} agents for {len(state.hands)} seats")
+
     trace = []
     while state.turn is not None:
         actions = legal_actions(state)
-        action = choose_action(state, actions, rng)
+        observation = observe(state, trace)
+        action = agents[state.turn](observation, actions, rng)
         trace.append((state.turn, action))
         apply_action(state, action)
     return trace, points(state)
+
+
+def play_hand(num_players, rng, choose_action):
+    """
+    Deals and plays one full hand, to the 2nd player out, with the same agent in every seat.
+    num_players: 3 to 8. rng: the caller's random.Random; it drives the deal and then the
+    agent, so one seed replays the whole hand.
+    choose_action(observation, actions, rng) -> one of actions.
+    Returns (trace, points), as play_out.
+    """
+    state = new_hand(num_players, rng)
+    agents = []
+    for _ in range(num_players):
+        agents.append(choose_action)
+    return play_out(state, agents, rng)

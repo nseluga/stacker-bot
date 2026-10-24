@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import choose_random
+from stacker.agents import random_agent
 from stacker.cards import CONFIGS
 from stacker.game import PASS, play_hand
 
@@ -45,27 +45,27 @@ def trace_text(trace):
 
 @pytest.mark.parametrize("num_players", list(CONFIGS))
 def test_same_seed_replays_the_same_hand(num_players):
-    first = play_hand(num_players, random.Random(REPLAY_SEED), choose_random)
-    second = play_hand(num_players, random.Random(REPLAY_SEED), choose_random)
+    first = play_hand(num_players, random.Random(REPLAY_SEED), random_agent)
+    second = play_hand(num_players, random.Random(REPLAY_SEED), random_agent)
     assert first == second
 
 
 @pytest.mark.parametrize("num_players", list(CONFIGS))
 def test_different_seed_plays_a_different_hand(num_players):
-    first_trace, _ = play_hand(num_players, random.Random(REPLAY_SEED), choose_random)
-    other_trace, _ = play_hand(num_players, random.Random(OTHER_SEED), choose_random)
+    first_trace, _ = play_hand(num_players, random.Random(REPLAY_SEED), random_agent)
+    other_trace, _ = play_hand(num_players, random.Random(OTHER_SEED), random_agent)
     assert first_trace != other_trace
 
 
 # The child process plays one hand per config and prints each trace on its own line.
 CHILD_SCRIPT = """
 import random
-from helpers import choose_random
+from stacker.agents import random_agent
 from stacker.cards import CONFIGS
 from stacker.game import play_hand
 from test_replay import REPLAY_SEED, trace_text
 for num_players in CONFIGS:
-    trace, scores = play_hand(num_players, random.Random(REPLAY_SEED), choose_random)
+    trace, scores = play_hand(num_players, random.Random(REPLAY_SEED), random_agent)
     print(trace_text(trace), scores)
 """
 

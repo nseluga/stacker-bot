@@ -13,7 +13,8 @@ import random
 
 import pytest
 
-from helpers import brute_force_plays, choose_random, parse_cards
+from helpers import brute_force_plays, parse_cards
+from stacker.agents import random_agent
 from stacker.cards import CONFIGS, build_deck
 from stacker.game import PASS, HandState, apply_action, legal_actions, new_hand, points
 
@@ -78,7 +79,7 @@ def test_random_hand_follows_the_rules(num_players, seed):
     while state.turn is not None:
         actions = legal_actions(state)
         check_step(state, actions, played)
-        action = choose_random(state, actions, rng)
+        action = random_agent(state, actions, rng)
         if action != PASS:
             played.extend(action.cards)
         apply_action(state, action)
