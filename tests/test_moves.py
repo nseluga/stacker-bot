@@ -85,6 +85,18 @@ def test_generator_matches_brute_force_two_decks_opening():
     assert_matches_brute_force(TWO_DECK_HAND, 2, None, card("3s'"))
 
 
+# Three quads in a row: bomb-sized groups inside a multi-run (engine_rules "Rules confirmed").
+QUAD_RUN_HAND = "3s 3c 3d 3h 4s 4c 4d 4h 5s 5c 5d 5h 9h"
+
+
+def test_generator_lists_multi_runs_of_bomb_sized_groups():
+    assert_matches_brute_force(QUAD_RUN_HAND, 1, None, None)
+    plays = []
+    for play in legal_plays(parse_cards(QUAD_RUN_HAND), 1, None, None):
+        plays.append(play.cards)
+    assert tuple(parse_cards("3s 3c 3d 3h 4s 4c 4d 4h 5s 5c 5d 5h")) in plays
+
+
 def test_small_opening_hand_counted_by_hand():
     hand = parse_cards("3s 3c 4s 5s 6s")
     generated = set()

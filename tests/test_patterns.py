@@ -87,6 +87,14 @@ def test_multi_run_may_end_king_ace_two():
     assert classify_text("Ks Kc As Ac 2s 2c") == Pattern(RUN, 2, 3, card("2c"))
 
 
+def test_triples_of_consecutive_ranks_are_a_multi_run():
+    assert classify_text("3s 3c 3d 4s 4c 4d 5s 5c 5d") == Pattern(RUN, 3, 3, card("5d"))
+
+
+def test_full_house_is_rejected():
+    assert classify_text("3s 3c 3d 4s 4c") is None
+
+
 def test_uneven_groups_are_rejected():
     assert classify_text("3s 3c 4s 5s 5c") is None
     assert classify_text("3s 3c 4s 4c 4d 5s 5c") is None
