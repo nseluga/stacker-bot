@@ -130,10 +130,27 @@ def deal(num_players, rng):
     """
     if num_players not in CONFIGS:
         raise ValueError(f"num_players must be 3 to 8, got {num_players}")
+    deck = build_deck(CONFIGS[num_players].num_decks)
+    rng.shuffle(deck)
+    return deal_from_order(deck, num_players)
+
+
+def deal_from_order(deck_order, num_players):
+    """
+    Deals a deck that is already in a fixed order: the second half of deal, split out so a
+    sealed deal (stored as its deck order) replays through exactly the same code as a live one.
+    deck_order: list of Cards, the whole deck for this config. Not changed: slicing copies.
+    Returns a Deal, as deal does.
+    """
+    if num_players not in CONFIGS:
+        raise ValueError(f"num_players must be 3 to 8, got {num_players}")
     config = CONFIGS[num_players]
 
-    deck = build_deck(config.num_decks)
-    rng.shuffle(deck)
+    # A short or long order would silently deal wrong-sized hands or aside, so refuse it.
+    deck_size = len(build_deck(config.num_decks))
+    if len(deck_order) != deck_size:
+        raise ValueError(f"{num_players} players need {deck_size} cards, got {len(deck_order)}")
+    deck = deck_order
 
     hands = []
     for seat in range(num_players):
