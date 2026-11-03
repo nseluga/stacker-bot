@@ -5,6 +5,8 @@ A card is a (rank, suit, deck) tuple. Python compares tuples field by field, lef
 right, so sorting cards by this tuple gives the game's full card order: rank first
 (3 lowest, 2 highest), then suit (♠ < ♣ < ♦ < ♥), then deck (bad copy just below the
 good copy of the same card). With one deck, every card is a good copy.
+
+The file also builds and deals decks, and parses typed card strings like "3s 10h 2h'".
 """
 
 from typing import NamedTuple
@@ -14,6 +16,9 @@ RANK_NAMES = ("3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A", "2")
 
 # Suit symbols, lowest to highest. A card's suit field is its index here (♠ → 0, ♥ → 3).
 SUIT_SYMBOLS = ("♠", "♣", "♦", "♥")
+
+# Suit letters for typing cards in (tests and the play_human prompt), same order as SUIT_SYMBOLS.
+SUIT_LETTERS = ("s", "c", "d", "h")
 
 # Deck field values. The bad copy is the smaller value, so it sorts just below its good copy.
 BAD_DECK = 0
@@ -43,6 +48,36 @@ class Card(NamedTuple):
             return name + BAD_COPY_MARK
         else:
             return name
+
+
+def parse_cards(text):
+    """
+    Turns a space-separated string of cards into a list of Cards, in the order written.
+    text: str, e.g. "3s 10h 2h'". Each token is a rank name from RANK_NAMES, then a suit
+    letter from SUIT_LETTERS, then an optional BAD_COPY_MARK for a bad copy. Case does not
+    matter ("jd" and "JD" are both J♦), so typing at a prompt needs no shift key.
+    Raises ValueError naming the token when a token cannot be read.
+    """
+    cards = []
+    for token in text.split():
+        # A trailing mark means the bad copy; without it, the card is the good copy.
+        if token.endswith(BAD_COPY_MARK):
+            deck = BAD_DECK
+            rank_and_suit = token[:-1]
+        else:
+            deck = GOOD_DECK
+            rank_and_suit = token
+
+        # The suit letter is the last character left; everything before it is the rank name.
+        rank_name = rank_and_suit[:-1].upper()
+        suit_letter = rank_and_suit[-1:].lower()
+        if rank_name not in RANK_NAMES or suit_letter not in SUIT_LETTERS:
+            raise ValueError(f"cannot read card {token!r}")
+
+        # Rank and suit are stored as their positions in RANK_NAMES and SUIT_LETTERS.
+        card = Card(RANK_NAMES.index(rank_name), SUIT_LETTERS.index(suit_letter), deck)
+        cards.append(card)
+    return cards
 
 
 # Deck field values present for each deck count. One deck has only good copies; two decks

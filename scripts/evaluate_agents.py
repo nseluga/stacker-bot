@@ -27,16 +27,17 @@ import subprocess
 import time
 from pathlib import Path
 
-from stacker.agents import random_agent
+from stacker.agents import greedy_agent, random_agent
 from stacker.cards import CONFIGS, build_deck
 from stacker.evaluate import bootstrap_ci, paired_differences
+from stacker.heuristic import heuristic_agent
 from stacker.sealed import config_name, load_sealed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESULTS_ROOT = REPO_ROOT / "results"
 
-# Agents a run can name. greedy and heuristic join at the baselines stage.
-AGENTS = {"random": random_agent}
+# Agents a run can name with --test and --field: the ladder rungs built so far.
+AGENTS = {"random": random_agent, "greedy": greedy_agent, "heuristic": heuristic_agent}
 
 # Rule 2: seeds 0–2 are test seeds, for confirm runs only. Exploration uses seeds from 10 up.
 TEST_SEEDS = (0, 1, 2)

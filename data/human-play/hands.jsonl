@@ -1,0 +1,58 @@
+{"seed": 1000, "decision": 0, "choice": [[1, 3, 1]], "choice_text": "4\u2665", "reason": "we can put down 9-2 together, if we did 345 we would need to get rid of a 3 which we cant, if we get rid of the 4 we only have to get rid of the 5 from here on out to play 33 77 9-2"}
+{"seed": 1000, "decision": 1, "choice": "pass", "choice_text": "pass", "reason": "playing any of our 9-2 run does not make it easier for us to finish, it makes it harder"}
+{"seed": 1000, "decision": 2, "choice": [[2, 1, 1]], "choice_text": "5\u2663", "reason": "now can finish with 33 77 and 9-2"}
+{"seed": 1000, "decision": 3, "choice": "pass", "choice_text": "pass", "reason": "none of them are close to going out so we want to save our good cards"}
+{"seed": 1000, "decision": 4, "choice": "pass", "choice_text": "pass", "reason": "still none of them are that close and if we can get ours down in a row we will win, if we get rid of the 7 we will still have no way to get the last one down since 33 likely cant win"}
+{"seed": 1000, "decision": 5, "choice": [[12, 3, 1]], "choice_text": "2\u2665", "reason": "cant risk letting s3 win, still keeps our long run"}
+{"seed": 1000, "decision": 6, "choice": [[0, 2, 1], [0, 3, 1]], "choice_text": "3\u2666 3\u2665", "reason": "to try to get down the 3s and 7s so that all we ahve left is high run"}
+{"seed": 1000, "decision": 7, "choice": "pass", "choice_text": "pass", "reason": "have to"}
+{"seed": 1000, "decision": 8, "choice": [[11, 2, 1]], "choice_text": "A\u2666", "reason": "have to try to stop s1 from winning"}
+{"seed": 1000, "decision": 9, "choice": [[6, 2, 1], [7, 0, 1], [8, 3, 1], [9, 3, 1], [10, 1, 1]], "choice_text": "9\u2666 10\u2660 J\u2665 Q\u2665 K\u2663", "reason": "they cant beat it so i finish with 7s"}
+{"seed": 1000, "decision": 10, "choice": [[4, 0, 1], [4, 3, 1]], "choice_text": "7\u2660 7\u2665", "reason": "i win"}
+{"seed": 1001, "decision": 0, "choice": [[2, 3, 1]], "choice_text": "5\u2665", "reason": "pair of kings and aces can likely win a hand if i can get my 4s down so i want to keep them to win that round later"}
+{"seed": 1001, "decision": 1, "choice": [[7, 2, 1]], "choice_text": "10\u2666", "reason": "lowest 1 that isnt part of a bigger combo"}
+{"seed": 1001, "decision": 2, "choice": "pass", "choice_text": "pass", "reason": ""}
+{"seed": 1001, "decision": 3, "choice": [[4, 0, 1]], "choice_text": "7\u2660", "reason": "lowest 1 not part of a combo"}
+{"seed": 1001, "decision": 4, "choice": [[8, 2, 1]], "choice_text": "J\u2666", "reason": "lowest one not part of acombo"}
+{"seed": 1001, "decision": 5, "choice": "pass", "choice_text": "pass", "reason": ""}
+{"seed": 1001, "decision": 6, "choice": [[5, 2, 1]], "choice_text": "8\u2666", "reason": "lowest one not part of combo"}
+{"seed": 1001, "decision": 7, "choice": "pass", "choice_text": "pass", "reason": "gotta save high pairs"}
+{"seed": 1001, "decision": 8, "choice": "pass", "choice_text": "pass", "reason": "my kings and aces probably wont win this round anyway so i want to save the pairs"}
+{"seed": 1001, "decision": 9, "choice": "pass", "choice_text": "pass", "reason": "still a higher ace out there than mine and a 2 meaning i wont win this round either, have to hope that s1 and s2 can stop s3 from winning here, if they cant i likely cant anyway. have to prioritize getting all mine down in a row for a chance at 1 or 2"}
+{"seed": 1001, "decision": 10, "choice": "pass", "choice_text": "pass", "reason": "i know that s1 has to have a better ace or the 2 so even if i play ill lose, since s3 alrassed they cant win so s1 will win anyway so i might as well save my good cards"}
+{"seed": 1002, "decision": 0, "choice": [[0, 0, 1], [1, 2, 1], [2, 2, 1], [3, 1, 1], [4, 3, 1]], "choice_text": "3\u2660 4\u2666 5\u2666 6\u2663 7\u2665", "reason": "best way to get rid of all the low cards early"}
+{"seed": 1002, "decision": 1, "choice": [[6, 1, 1], [7, 1, 1], [8, 3, 1], [9, 0, 1], [10, 1, 1]], "choice_text": "9\u2663 10\u2663 J\u2665 Q\u2660 K\u2663", "reason": "think that i have enough to win thisn ext turn as long as i win this hand by playing 4 10 2"}
+{"seed": 1002, "decision": 2, "choice": [[1, 3, 1]], "choice_text": "4\u2665", "reason": "lowest to get out"}
+{"seed": 1002, "decision": 3, "choice": [[7, 3, 1]], "choice_text": "10\u2665", "reason": "lowest to get out"}
+{"seed": 1002, "decision": 4, "choice": [[12, 2, 1]], "choice_text": "2\u2666", "reason": "win"}
+{"seed": 1003, "decision": 0, "choice": [[1, 2, 1]], "choice_text": "4\u2666", "reason": "can play 55 66 77 and the rest of the cardsa re high, jsut need to get out the 4"}
+{"seed": 1003, "decision": 1, "choice": [[8, 1, 1]], "choice_text": "J\u2663", "reason": "lowest single not connected to anything else"}
+{"seed": 1003, "decision": 2, "choice": [[12, 0, 1]], "choice_text": "2\u2660", "reason": "lowest i can play, i know ill win the hand with 2h and can try to bait out the 2d so that 2c becomes the highest left, 55 66 77 probably not being beat meaning i can do that then q 2 and win"}
+{"seed": 1003, "decision": 3, "choice": [[12, 3, 1]], "choice_text": "2\u2665", "reason": "same as last"}
+{"seed": 1003, "decision": 4, "choice": [[2, 1, 1], [2, 3, 1], [3, 1, 1], [3, 3, 1], [4, 0, 1], [4, 3, 1]], "choice_text": "5\u2663 5\u2665 6\u2663 6\u2665 7\u2660 7\u2665", "reason": "think that no one beats that meaning i can win on the spot, even if they do my remaining two are high"}
+{"seed": 1003, "decision": 5, "choice": [[9, 2, 1]], "choice_text": "Q\u2666", "reason": "lowest to get rid of"}
+{"seed": 1003, "decision": 6, "choice": [[12, 1, 1]], "choice_text": "2\u2663", "reason": "know its the highest"}
+{"seed": 1003, "decision": 7, "choice": [[11, 0, 1]], "choice_text": "A\u2660", "reason": "win"}
+{"seed": 1004, "decision": 0, "choice": "pass", "choice_text": "pass", "reason": "all are connected, want to save so we can go all in a row"}
+{"seed": 1004, "decision": 1, "choice": "pass", "choice_text": "pass", "reason": "same as last"}
+{"seed": 1004, "decision": 2, "choice": [[11, 1, 1]], "choice_text": "A\u2663", "reason": "they are low enough i need to not let them win, a is lowest disconnected and since htey are only at 6 3 and 5 my pairs and runs are likely good"}
+{"seed": 1004, "decision": 3, "choice": [[12, 2, 1]], "choice_text": "2\u2666", "reason": "win the hand and try to win with my runs"}
+{"seed": 1004, "decision": 4, "choice": [[1, 1, 1], [1, 3, 1]], "choice_text": "4\u2663 4\u2665", "reason": "gotta try to win with the pairs, i think theirs are relatively low or unlikely to have pairs sicne many high cards played"}
+{"seed": 1004, "decision": 5, "choice": "pass", "choice_text": "pass", "reason": "cant win"}
+{"seed": 1004, "decision": 6, "choice": "pass", "choice_text": "pass", "reason": "have to try to win on runs"}
+{"seed": 1004, "decision": 7, "choice": [[7, 1, 1]], "choice_text": "10\u2663", "reason": "have to try to stop s1 form winning"}
+{"seed": 1005, "decision": 0, "choice": [[0, 0, 1]], "choice_text": "3\u2660", "reason": "have to"}
+{"seed": 1005, "decision": 1, "choice": [[9, 2, 1]], "choice_text": "Q\u2666", "reason": "lowest disconnected"}
+{"seed": 1005, "decision": 2, "choice": "pass", "choice_text": "pass", "reason": "have to"}
+{"seed": 1005, "decision": 3, "choice": [[10, 2, 1]], "choice_text": "K\u2666", "reason": "ka2 can fall on top of 67 or 789 to win"}
+{"seed": 1005, "decision": 4, "choice": "pass", "choice_text": "pass", "reason": "rest are connected"}
+{"seed": 1005, "decision": 5, "choice": "pass", "choice_text": "pass", "reason": ""}
+{"seed": 1005, "decision": 6, "choice": "pass", "choice_text": "pass", "reason": ""}
+{"seed": 1005, "decision": 7, "choice": "pass", "choice_text": "pass", "reason": ""}
+{"seed": 1005, "decision": 8, "choice": [[10, 3, 1]], "choice_text": "K\u2665", "reason": "they have few enough left its unlikely they can beat runs or pairs anyway"}
+{"seed": 1005, "decision": 9, "choice": [[3, 2, 1], [4, 0, 1]], "choice_text": "6\u2666 7\u2660", "reason": "unlikely they can beat it"}
+{"seed": 1005, "decision": 10, "choice": "pass", "choice_text": "pass", "reason": ""}
+{"seed": 1005, "decision": 11, "choice": [[4, 1, 1], [5, 1, 1], [6, 0, 1]], "choice_text": "7\u2663 8\u2663 9\u2660", "reason": "they cant beat it"}
+{"seed": 1005, "decision": 12, "choice": [[11, 3, 1]], "choice_text": "A\u2665", "reason": "they cant beat it"}
+{"seed": 1005, "decision": 13, "choice": [[12, 1, 1]], "choice_text": "2\u2663", "reason": "same"}
+{"seed": 1005, "decision": 14, "choice": [[1, 0, 1], [1, 1, 1]], "choice_text": "4\u2660 4\u2663", "reason": "win"}

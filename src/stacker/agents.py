@@ -17,6 +17,14 @@ def random_agent(observation, actions, rng):
     return rng.choice(actions)
 
 
+def greedy_key(play):
+    """
+    greedy's ordering of plays, lowest first: (bomb or not, top card, card count, the cards).
+    play: a moves.Play, never PASS. Used by greedy_agent and by the heuristic's tie-breaks.
+    """
+    return (play.pattern.kind == BOMB, play.pattern.top_card, len(play.cards), play.cards)
+
+
 def greedy_agent(observation, actions, rng):
     """
     The second rung, "lowest legal" (plan §3 rule 3; decision log 2026-10-24 and 2026-10-31):
@@ -37,7 +45,7 @@ def greedy_agent(observation, actions, rng):
     for action in actions:
         if action == PASS:
             continue
-        key = (action.pattern.kind == BOMB, action.pattern.top_card, len(action.cards), action.cards)
+        key = greedy_key(action)
         if best_key is None or key < best_key:
             best_play = action
             best_key = key
