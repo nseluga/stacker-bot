@@ -1,0 +1,5 @@
+run,seed,deals,mean,ci_low,ci_high,standard_deviation,uncommitted_changes,sd_of_seed_means
+4p1d_heuristic-vs-greedy_seats0_sealed_n150_seed0,0,150,0.655,0.6016666666666667,0.7083333333333333,0.3447472569012545,False,
+4p1d_heuristic-vs-greedy_seats0_sealed_n150_seed1,1,150,0.6566666666666666,0.6033333333333333,0.71,0.34215398759977217,True,
+4p1d_heuristic-vs-greedy_seats0_sealed_n150_seed2,2,150,0.655,0.5983333333333334,0.7116666666666667,0.3519719139191641,True,
+mean ± sd over seeds,,,0.6555555555555556,,,,,0.0009622504486493344

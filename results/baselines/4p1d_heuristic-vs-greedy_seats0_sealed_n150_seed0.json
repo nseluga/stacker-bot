@@ -1,0 +1,20 @@
+{
+  "players": 4,
+  "test": "heuristic",
+  "field": "greedy",
+  "test_seats": [
+    0
+  ],
+  "deals": 150,
+  "seed": 0,
+  "source": "sealed",
+  "mean": 0.655,
+  "ci_low": 0.6016666666666667,
+  "ci_high": 0.7083333333333333,
+  "standard_deviation": 0.3447472569012545,
+  "bootstrap_resamples_seed": "0:bootstrap",
+  "git_commit": "afde2d7aef14c27629d47ec28bfd2bcffee0dcbb",
+  "uncommitted_changes": false,
+  "play_seconds": 50.17,
+  "bootstrap_seconds": 0.08
+}
