@@ -43,6 +43,10 @@ AGENTS = {"random": random_agent, "greedy": greedy_agent, "heuristic": heuristic
 TEST_SEEDS = (0, 1, 2)
 DEV_SEED_MIN = 10
 
+# The folders whose changes can alter a result. Data and results are outputs, not code.
+# ponytail: data/sealed-deals/ is left out; it is hash-checked on load, so a change fails loudly.
+CODE_PATHS = ("src", "scripts", "tests")
+
 
 def select_deals(num_players, count, seed, confirm):
     """
@@ -80,13 +84,24 @@ def select_deals(num_players, count, seed, confirm):
     return deck_orders
 
 
-def git_state():
-    """The commit the code ran at, and whether uncommitted changes could make it not reproduce."""
+def git_state(repo_root=REPO_ROOT):
+    """
+    The commit the code ran at, and whether uncommitted changes could make it not reproduce.
+    repo_root: the repo to ask (a test passes a temporary repo). Returns (commit hash, bool).
+    Only changes under CODE_PATHS count, tracked or new. A new result file in results/ cannot
+    change what the code computes, so it must not set the flag (M1 open item: seeds 1-2 were
+    flagged only because seed 0's result files were untracked).
+    """
     commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, capture_output=True, text=True, check=True
     ).stdout.strip()
+
+    # "--" ends the options; the paths after it limit git status to the code folders.
+    status_command = ["git", "status", "--porcelain", "--"]
+    for path in CODE_PATHS:
+        status_command.append(path)
     changes = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+        status_command, cwd=repo_root, capture_output=True, text=True, check=True
     ).stdout.strip()
     return commit, changes != ""
 
