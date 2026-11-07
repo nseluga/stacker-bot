@@ -8,7 +8,7 @@ passes, finishers and the history. Nothing hidden.
 
 Each finished hand is appended to data/human-play/hands.jsonl as one line per decision: the
 hand's seed, the decision's number, the chosen cards and an optional reason. The greedy seats are
-deterministic, so seed + choices replay the whole hand (scripts/replay_human.py, piece 7).
+deterministic, so seed + choices replay the whole hand (scratch/check_choose_follow.py does).
 
 Run from the repo root:
     PYTHONPATH=src .venv/bin/python scripts/play_human.py
@@ -30,7 +30,7 @@ NATE_SEAT = 0
 # heuristic's rules and weights rest on (manifest Paths).
 LOG_PATH = Path("data/human-play/hands.jsonl")
 
-# Hand seeds count up from here: clear of the test seeds (10, 11) and evaluate_agents' dev draws,
+# Hand seeds count up from here: clear of the test seeds (0-2) and evaluate_agents' dev draws,
 # and each hand gets a seed no earlier hand used.
 FIRST_SEED = 1000
 

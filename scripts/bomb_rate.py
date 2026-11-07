@@ -9,7 +9,7 @@ Mechanism: for each table size, deal DEALS shuffled tables, count how many copie
 rank every seat holds, and flag the seat if its biggest group reaches the bomb size. Reports
 the share of hands with a bomb and the share of tables where at least one seat has one.
 This is a dev simulation on freshly shuffled decks (seed 10), not the sealed deals.
-Writes results/bomb-rate.md.
+Writes results/baselines/bomb-rate.md.
 """
 
 import random
@@ -21,7 +21,7 @@ from stacker.patterns import BOMB_MIN_SIZE
 # Tables dealt per table size; more tables tighten the estimated rates.
 DEALS = 20_000
 SEED = 10
-RESULT_PATH = Path("results/bomb-rate.md")
+RESULT_PATH = Path("results/baselines/bomb-rate.md")
 
 
 def main():

@@ -124,7 +124,7 @@ def bootstrap_ci(values, rng):
     How: draw len(values) values from values with replacement and take the mean; repeat
     BOOTSTRAP_RESAMPLES times. The spread of those means shows how much the mean would move on a
     different draw of deals. The 2.5th and 97.5th percentiles of them are the CI.
-    Percentile, not BCa: for a mean over thousands of deals the two give the same coverage, and
+    Percentile, not BCa: for a mean over 150+ deals the two give nearly the same coverage, and
     percentile is the most robust (Agarwal et al. 2021 Fig. 6; André et al. 2026 §4.1, §5).
     """
     if len(values) == 0:
