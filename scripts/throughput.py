@@ -9,7 +9,7 @@ Run from the repo root, e.g. 4p1d greedy at 1, 4 and 8 processes, 10 s each:
     PYTHONPATH=src .venv/bin/python scripts/throughput.py --players 4 --agent greedy \
         --seconds 10 --processes 1,4,8 --seed 14
 Output: <out-dir>/<config>_throughput_<agent>_<machine>_dev_s<seconds>_seed<s>.json (machine,
-CPU count, Python version, one row per process count, git commit).
+CPU counts, Python version, one row per process count with load and wall time, git commit).
 """
 
 import argparse
@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import socket
+import time
 from pathlib import Path
 
 from evaluate_agents import AGENTS, DEV_SEED_MIN, RESULTS_ROOT, git_state
@@ -53,6 +54,8 @@ def main():
         process_counts.append(int(part))
 
     # The short hostname names the machine, so laptop and teapot results never collide.
+    # ponytail: macOS renames the laptop per network (…-133, …-89); add a --machine flag if a
+    # stable laptop name matters.
     machine = socket.gethostname().split(".")[0]
     seconds_label = f"{args.seconds:g}"
     run_name = (
@@ -62,15 +65,22 @@ def main():
 
     rows = []
     for processes in process_counts:
+        # Load before the row: other users' work on a shared box slows every worker.
+        load_one_minute = os.getloadavg()[0]
+        start = time.perf_counter()
         decision_rate, hand_rate, per_worker = decisions_per_second(
             args.players, AGENTS[args.agent], args.seconds, processes, args.seed
         )
+        # Wall time includes pool start; it checks that workers' timed windows overlapped.
+        wall_seconds = time.perf_counter() - start
         workers = []
         for decisions, hands, elapsed in per_worker:
             workers.append({"decisions": decisions, "hands": hands, "seconds": round(elapsed, 3)})
         rows.append(
             {
                 "processes": processes,
+                "load_one_minute_before": round(load_one_minute, 2),
+                "wall_seconds": round(wall_seconds, 3),
                 "decisions_per_second": round(decision_rate, 1),
                 "hands_per_second": round(hand_rate, 2),
                 "decisions_per_second_per_process": round(decision_rate / processes, 1),
@@ -85,6 +95,14 @@ def main():
 
     commit, uncommitted_changes = git_state()
 
+    # CPUs this process may run on: an account limit can be below cpu_count (teapot: 39 of 48).
+    # sched_getaffinity is Linux only, so macOS records None.
+    # ponytail: physical-core layout (lscpu) is cited in the log, not recorded here.
+    if hasattr(os, "sched_getaffinity"):
+        usable_cpus = len(os.sched_getaffinity(0))
+    else:
+        usable_cpus = None
+
     record = {
         "players": args.players,
         "agent": args.agent,
@@ -93,6 +111,7 @@ def main():
         "source": "dev",
         "machine": machine,
         "cpu_count": os.cpu_count(),
+        "usable_cpus": usable_cpus,
         "python": platform.python_version(),
         "rows": rows,
         "git_commit": commit,

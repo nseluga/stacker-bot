@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import random
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -77,11 +78,20 @@ def test_game_shape_counts_add_up_and_replay():
     rng = random.Random(f"{TEST_SEED}:0")
     play_out(new_hand(NUM_PLAYERS, rng), [counted] * NUM_PLAYERS, rng)
     passes = 0
+    forced = 0
     for decision in log:
         if decision.passed:
             passes += 1
+        if decision.legal_count == 1:
+            forced += 1
     assert hand_rows[0]["moves"] == len(log)
     assert hand_rows[0]["passes"] == passes
+    assert hand_rows[0]["forced"] == forced
+
+    # Greedy passes only when PASS is its one action, so it never passes by choice.
+    assert summary["choice_pass_rate"] == 0
+    assert 0 < summary["forced_share"] < 1
+    assert summary["moves_p90"] <= summary["moves_p99"] <= summary["moves_max"]
 
 
 def run_characterize_game(arguments):
@@ -125,20 +135,41 @@ def test_characterize_game_script_refuses_a_test_seed(tmp_path):
 
 def test_deal_luck_share_edge_cases_and_hand_value():
     # Constant-sum rotations: the deal only moves points between seats, so pairing cancels all.
-    share, sigma = deal_luck_share([[2, 0, 1, 0], [0, 0, 1, 2]])
+    share, sigma, _seat, _deal = deal_luck_share([[2, 0, 1, 0], [0, 0, 1, 2]])
     assert share == 1
     assert sigma == 0
 
     # Identical rotations: pairing gains nothing, share = 1 - num_players.
-    share, _sigma = deal_luck_share([[2, 2, 2, 2], [0, 0, 0, 0], [1, 1, 1, 1]])
+    share, _sigma, _seat, _deal = deal_luck_share([[2, 2, 2, 2], [0, 0, 0, 0], [1, 1, 1, 1]])
     assert abs(share - (1 - 4)) < 1e-12
 
     # Hand-computed: pooled pvariance 0.359375 / 4 = 0.08984375; means 0.75, 1.0 -> 0.015625.
-    share, _sigma = deal_luck_share([[2, 0, 0, 1], [1, 1, 1, 1]])
+    share, _sigma, _seat, _deal = deal_luck_share([[2, 0, 0, 1], [1, 1, 1, 1]])
     assert abs(share - 19 / 23) < 1e-12
 
     # Every score equal: 0 / 0, reported as None.
-    assert deal_luck_share([[1, 1], [1, 1]]) == (None, 0)
+    assert deal_luck_share([[1, 1], [1, 1]]) == (None, 0, 0, 0)
+
+
+def test_deal_luck_share_splits_the_pooled_variance():
+    # Law of total variance: seat luck + deal luck = pooled variance, on any rows.
+    rng = random.Random(TEST_SEED)
+    rotation_rows = []
+    for _ in range(50):
+        scores = []
+        for _rotation in range(NUM_PLAYERS):
+            scores.append(rng.choice((0, 1, 2, 3)))
+        rotation_rows.append(scores)
+    _share, _sigma, seat_variance, deal_variance = deal_luck_share(rotation_rows)
+    pooled = []
+    for scores in rotation_rows:
+        pooled.extend(scores)
+    assert abs(seat_variance + deal_variance - statistics.pvariance(pooled)) < 1e-12
+
+    # Hand-computed: deal [2, 0, 0, 1] has variance 0.6875, deal [1, 1, 1, 1] has 0.
+    _share, _sigma, seat_variance, deal_variance = deal_luck_share([[2, 0, 0, 1], [1, 1, 1, 1]])
+    assert abs(seat_variance - 0.34375) < 1e-12
+    assert abs(deal_variance - 0.015625) < 1e-12
 
 
 def run_deal_luck(arguments):
@@ -170,9 +201,13 @@ def test_deal_luck_script_writes_share_from_its_rows(tmp_path):
     assert len(rotation_rows) == 5
     with open(tmp_path / (run_name + ".json")) as file:
         record = json.load(file)
-    assert (record["deal_luck_share"], record["standard_deviation"]) == deal_luck_share(
-        rotation_rows
+    expected = (
+        record["deal_luck_share"],
+        record["standard_deviation"],
+        record["seat_variance"],
+        record["deal_variance"],
     )
+    assert expected == deal_luck_share(rotation_rows)
 
 
 def test_deal_luck_script_refuses_a_test_seed(tmp_path):
@@ -237,6 +272,10 @@ def test_throughput_script_writes_one_row_per_process_count(tmp_path):
         process_counts.append(row["processes"])
     assert process_counts == [1, 2]
     assert len(record["rows"][1]["workers"]) == 2
+    # Context fields: load and wall time per row; usable CPUs is None off Linux.
+    assert record["rows"][0]["wall_seconds"] >= 0.3
+    assert record["rows"][0]["load_one_minute_before"] >= 0
+    assert "usable_cpus" in record
 
 
 def test_throughput_script_refuses_a_test_seed(tmp_path):
@@ -247,3 +286,27 @@ def test_throughput_script_refuses_a_test_seed(tmp_path):
     )
     assert finished.returncode != 0
     assert list(tmp_path.iterdir()) == []
+
+
+def test_sigma_to_n_script_names_its_table_after_the_run(tmp_path):
+    # A minimal deal-luck JSON: the script reads only standard_deviation.
+    sigma = 0.5
+    deal_luck_json = tmp_path / "4p1d_deal-luck_greedy-vs-random_dev_n5_seed13.json"
+    with open(deal_luck_json, "w") as file:
+        json.dump({"players": 4, "standard_deviation": sigma}, file)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repo_root / "src")
+    command = [sys.executable, str(repo_root / "scripts" / "sigma_to_n.py"), str(deal_luck_json),
+               "--out-dir", str(tmp_path)]
+    finished = subprocess.run(command, cwd=repo_root, env=environment, capture_output=True,
+                              text=True)
+    assert finished.returncode == 0, finished.stderr
+
+    # One row per δ, each deals_needed(σ, δ), in a table named after the pair and run.
+    with open(tmp_path / "4p1d_sigma-to-n_greedy-vs-random_dev_n5_seed13.csv") as file:
+        rows = list(csv.DictReader(file))
+    assert len(rows) == 4
+    for row in rows:
+        assert int(row["deals_needed"]) == deals_needed(sigma, float(row["delta"]))

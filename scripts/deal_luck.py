@@ -69,7 +69,7 @@ def main():
         rotation_rows.append(scores)
     play_seconds = time.perf_counter() - start
 
-    share, sigma = deal_luck_share(rotation_rows)
+    share, sigma, seat_variance, deal_variance = deal_luck_share(rotation_rows)
 
     # Mean paired difference, as in paired_differences: rotation mean minus the field's share.
     field_share = len(TEST_SEATS) * POINTS_PER_HAND / args.players
@@ -100,6 +100,8 @@ def main():
         "source": "dev",
         "deal_luck_share": share,
         "standard_deviation": sigma,
+        "seat_variance": seat_variance,
+        "deal_variance": deal_variance,
         "mean_difference": mean_difference,
         "git_commit": commit,
         "uncommitted_changes": uncommitted_changes,

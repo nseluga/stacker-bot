@@ -10,9 +10,11 @@
   "source": "dev",
   "deal_luck_share": -0.026796170258491125,
   "standard_deviation": 0.3756156108138839,
+  "seat_variance": 0.408125,
+  "deal_variance": 0.140946,
   "mean_difference": 0.673,
-  "git_commit": "e12b575def77d2de7b1f43873425102860f3bd33",
+  "git_commit": "729dc3255c1b7f9e750eabda2bbfe6e0e711b959",
   "uncommitted_changes": true,
-  "play_seconds": 347.92,
-  "seconds_per_deal": 0.3479
+  "play_seconds": 264.95,
+  "seconds_per_deal": 0.265
 }

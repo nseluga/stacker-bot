@@ -1,0 +1,401 @@
+{
+  "players": 8,
+  "agent": "greedy",
+  "seconds": 10.0,
+  "seed": 14,
+  "source": "dev",
+  "machine": "teapot",
+  "cpu_count": 48,
+  "python": "3.15.0",
+  "rows": [
+    {
+      "processes": 1,
+      "decisions_per_second": 34205.4,
+      "hands_per_second": 234.66,
+      "decisions_per_second_per_process": 34205.4,
+      "workers": [
+        {
+          "decisions": 342107,
+          "hands": 2347,
+          "seconds": 10.002
+        }
+      ]
+    },
+    {
+      "processes": 8,
+      "decisions_per_second": 267436.2,
+      "hands_per_second": 1833.94,
+      "decisions_per_second_per_process": 33429.5,
+      "workers": [
+        {
+          "decisions": 335432,
+          "hands": 2301,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 333127,
+          "hands": 2282,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 327879,
+          "hands": 2250,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 335731,
+          "hands": 2305,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 337945,
+          "hands": 2314,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 336121,
+          "hands": 2308,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 333344,
+          "hands": 2284,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 335308,
+          "hands": 2299,
+          "seconds": 10.002
+        }
+      ]
+    },
+    {
+      "processes": 24,
+      "decisions_per_second": 690567.8,
+      "hands_per_second": 4736.51,
+      "decisions_per_second_per_process": 28773.7,
+      "workers": [
+        {
+          "decisions": 296584,
+          "hands": 2033,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 299810,
+          "hands": 2054,
+          "seconds": 10.004
+        },
+        {
+          "decisions": 296014,
+          "hands": 2033,
+          "seconds": 10.005
+        },
+        {
+          "decisions": 254974,
+          "hands": 1751,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 294359,
+          "hands": 2014,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 294938,
+          "hands": 2026,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 297993,
+          "hands": 2042,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 287656,
+          "hands": 1973,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 256401,
+          "hands": 1755,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 298406,
+          "hands": 2041,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 296553,
+          "hands": 2034,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 296238,
+          "hands": 2026,
+          "seconds": 10.004
+        },
+        {
+          "decisions": 295539,
+          "hands": 2022,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 293576,
+          "hands": 2009,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 295875,
+          "hands": 2028,
+          "seconds": 10.005
+        },
+        {
+          "decisions": 294985,
+          "hands": 2025,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 239860,
+          "hands": 1657,
+          "seconds": 10.004
+        },
+        {
+          "decisions": 242068,
+          "hands": 1657,
+          "seconds": 10.007
+        },
+        {
+          "decisions": 299326,
+          "hands": 2062,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 293728,
+          "hands": 2016,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 296612,
+          "hands": 2034,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 296642,
+          "hands": 2035,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 292461,
+          "hands": 2006,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 296822,
+          "hands": 2044,
+          "seconds": 10.003
+        }
+      ]
+    },
+    {
+      "processes": 38,
+      "decisions_per_second": 727826.3,
+      "hands_per_second": 4992.44,
+      "decisions_per_second_per_process": 19153.3,
+      "workers": [
+        {
+          "decisions": 239153,
+          "hands": 1638,
+          "seconds": 10.005
+        },
+        {
+          "decisions": 158896,
+          "hands": 1089,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 158816,
+          "hands": 1089,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 161167,
+          "hands": 1107,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 283359,
+          "hands": 1938,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 206450,
+          "hands": 1416,
+          "seconds": 10.0
+        },
+        {
+          "decisions": 158458,
+          "hands": 1087,
+          "seconds": 10.008
+        },
+        {
+          "decisions": 159796,
+          "hands": 1097,
+          "seconds": 10.007
+        },
+        {
+          "decisions": 285202,
+          "hands": 1952,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 160183,
+          "hands": 1098,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 165463,
+          "hands": 1137,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 161430,
+          "hands": 1105,
+          "seconds": 10.006
+        },
+        {
+          "decisions": 160590,
+          "hands": 1099,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 194584,
+          "hands": 1334,
+          "seconds": 10.007
+        },
+        {
+          "decisions": 283942,
+          "hands": 1946,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 281939,
+          "hands": 1936,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 159198,
+          "hands": 1101,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 158786,
+          "hands": 1087,
+          "seconds": 10.006
+        },
+        {
+          "decisions": 161508,
+          "hands": 1111,
+          "seconds": 10.006
+        },
+        {
+          "decisions": 156739,
+          "hands": 1075,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 159082,
+          "hands": 1090,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 218857,
+          "hands": 1503,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 158709,
+          "hands": 1089,
+          "seconds": 10.005
+        },
+        {
+          "decisions": 158781,
+          "hands": 1094,
+          "seconds": 10.005
+        },
+        {
+          "decisions": 275219,
+          "hands": 1894,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 158978,
+          "hands": 1088,
+          "seconds": 10.004
+        },
+        {
+          "decisions": 158639,
+          "hands": 1089,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 159003,
+          "hands": 1092,
+          "seconds": 10.006
+        },
+        {
+          "decisions": 159433,
+          "hands": 1098,
+          "seconds": 10.007
+        },
+        {
+          "decisions": 242973,
+          "hands": 1658,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 159714,
+          "hands": 1097,
+          "seconds": 10.005
+        },
+        {
+          "decisions": 157111,
+          "hands": 1078,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 283413,
+          "hands": 1938,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 273262,
+          "hands": 1878,
+          "seconds": 10.004
+        },
+        {
+          "decisions": 159314,
+          "hands": 1093,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 224815,
+          "hands": 1540,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 158661,
+          "hands": 1086,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 159060,
+          "hands": 1094,
+          "seconds": 10.002
+        }
+      ]
+    }
+  ],
+  "git_commit": "729dc3255c1b7f9e750eabda2bbfe6e0e711b959",
+  "uncommitted_changes": false
+}

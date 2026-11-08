@@ -5,7 +5,8 @@ piece 4). Reads σ from a deal-luck run's JSON and writes N = ceil((2.8σ/δ)²)
 Run from the repo root after scripts/deal_luck.py:
     PYTHONPATH=src .venv/bin/python scripts/sigma_to_n.py \
         results/characterization/4p1d_deal-luck_heuristic-vs-greedy_dev_n1000_seed12.json
-Output: results/characterization/<config>_sigma-to-n.csv (delta, sigma, deals_needed).
+Output: <out-dir>/<the input's name, deal-luck → sigma-to-n>.csv (delta, sigma, deals_needed,
+source), e.g. 4p1d_sigma-to-n_heuristic-vs-greedy_dev_n1000_seed12.csv: one table per σ run.
 """
 
 import argparse
@@ -16,7 +17,6 @@ from pathlib import Path
 from evaluate_agents import RESULTS_ROOT
 
 from stacker.characterize import deals_needed
-from stacker.sealed import config_name
 
 # The edges in the decision log entry "M2 measures σ → N": 0.10 is M1's δ, the rest bracket it.
 DELTAS = (0.03, 0.05, 0.10, 0.20)
@@ -34,7 +34,9 @@ def main():
     sigma = record["standard_deviation"]
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = args.out_dir / f"{config_name(record['players'])}_sigma-to-n.csv"
+    # Named after its deal-luck run, so the table says which pair it holds for and never collides.
+    table_name = args.deal_luck_json.stem.replace("_deal-luck_", "_sigma-to-n_")
+    csv_path = args.out_dir / (table_name + ".csv")
     with open(csv_path, "w", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(["delta", "sigma", "deals_needed", "source"])

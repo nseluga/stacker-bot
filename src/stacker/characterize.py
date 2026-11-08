@@ -65,13 +65,20 @@ def game_shape(num_players, agent, num_hands, seed):
 
     Returns (hand_rows, summary).
     hand_rows: one dict per hand: hand_index, moves, passes, pass_chances (decisions where a pass
-    was allowed), max_legal (the largest legal_count in the hand).
+    was allowed), forced (decisions with one legal action), max_legal (the largest legal_count).
     summary: dict with
-    - moves per hand: moves_mean, moves_median, moves_p10, moves_p90;
+    - moves per hand: moves_mean, moves_median, moves_p10, moves_p90, moves_p99, moves_max
+      (p99 and max size M3's per-hand move window);
     - legal moves per turn, pooled over every decision: legal_mean, legal_median, legal_p90,
       legal_max (PASS counts as one legal action when allowed; see Decision);
     - pass_rate: all passes / all pass chances. Pooled, not an average of per-hand rates, so a
       hand with 30 chances weighs 10 times a hand with 3: the honest per-decision rate.
+    - forced_share: decisions with one legal action / all decisions. A forced decision needs no
+      choice, so at M3 it needs no net forward pass.
+    - choice_pass_rate, choice_legal_mean, choice_legal_p90: the same measures over choice
+      decisions only (two or more legal actions). choice_pass_rate is how often an agent passes
+      when it could have played, which compares agents fairly: forced passes say nothing about
+      the agent. choice_legal_* is the batch a net scores per real decision.
     """
     if num_hands < 2:
         raise ValueError("percentiles need at least 2 hands")
@@ -79,8 +86,11 @@ def game_shape(num_players, agent, num_hands, seed):
     hand_rows = []
     hand_moves = []
     all_legal_counts = []
+    choice_legal_counts = []
     total_passes = 0
     total_pass_chances = 0
+    choice_passes = 0
+    choice_pass_chances = 0
 
     for hand_index in range(num_hands):
         # A fresh log per hand, so each hand's decisions can be counted on their own.
@@ -97,6 +107,7 @@ def game_shape(num_players, agent, num_hands, seed):
         # Tally this hand's records.
         passes = 0
         pass_chances = 0
+        forced = 0
         max_legal = 0
         for decision in log:
             all_legal_counts.append(decision.legal_count)
@@ -107,12 +118,23 @@ def game_shape(num_players, agent, num_hands, seed):
             if decision.legal_count > max_legal:
                 max_legal = decision.legal_count
 
+            # One legal action is forced; two or more is a real choice.
+            if decision.legal_count == 1:
+                forced += 1
+            else:
+                choice_legal_counts.append(decision.legal_count)
+                if decision.pass_allowed:
+                    choice_pass_chances += 1
+                if decision.passed:
+                    choice_passes += 1
+
         hand_rows.append(
             {
                 "hand_index": hand_index,
                 "moves": len(log),
                 "passes": passes,
                 "pass_chances": pass_chances,
+                "forced": forced,
                 "max_legal": max_legal,
             }
         )
@@ -122,6 +144,8 @@ def game_shape(num_players, agent, num_hands, seed):
 
     move_deciles = statistics.quantiles(hand_moves, n=DECILE_STEPS, method="inclusive")
     legal_deciles = statistics.quantiles(all_legal_counts, n=DECILE_STEPS, method="inclusive")
+    # n=100 cuts every 1%; the last cut point is the 99th percentile.
+    move_percentiles = statistics.quantiles(hand_moves, n=100, method="inclusive")
 
     # A table where nobody ever had a pass chance would make the rate 0/0; report None then.
     if total_pass_chances > 0:
@@ -129,16 +153,37 @@ def game_shape(num_players, agent, num_hands, seed):
     else:
         pass_rate = None
 
+    # Same 0/0 guard for choice decisions: a run could, in principle, have no real choices at all.
+    if choice_pass_chances > 0:
+        choice_pass_rate = choice_passes / choice_pass_chances
+    else:
+        choice_pass_rate = None
+    if len(choice_legal_counts) >= 2:
+        choice_legal_mean = statistics.mean(choice_legal_counts)
+        choice_deciles = statistics.quantiles(
+            choice_legal_counts, n=DECILE_STEPS, method="inclusive"
+        )
+        choice_legal_p90 = choice_deciles[-1]
+    else:
+        choice_legal_mean = None
+        choice_legal_p90 = None
+
     summary = {
         "moves_mean": statistics.mean(hand_moves),
         "moves_median": statistics.median(hand_moves),
         "moves_p10": move_deciles[0],
         "moves_p90": move_deciles[-1],
+        "moves_p99": move_percentiles[-1],
+        "moves_max": max(hand_moves),
         "legal_mean": statistics.mean(all_legal_counts),
         "legal_median": statistics.median(all_legal_counts),
         "legal_p90": legal_deciles[-1],
         "legal_max": max(all_legal_counts),
         "pass_rate": pass_rate,
+        "forced_share": (len(all_legal_counts) - len(choice_legal_counts)) / len(all_legal_counts),
+        "choice_pass_rate": choice_pass_rate,
+        "choice_legal_mean": choice_legal_mean,
+        "choice_legal_p90": choice_legal_p90,
     }
     return hand_rows, summary
 
@@ -158,9 +203,17 @@ def deal_luck_share(rotation_rows):
     seat alike), so pairing gains nothing; identical rotations give 1 - num_players.
     Population variance in both places, so those edge cases come out exact.
 
-    Returns (share, sigma). sigma: sample stdev of the per-deal rotation means, equal to the σ of
-    M1's paired differences (subtracting the constant field share does not change the spread).
-    share is None when every score is equal (0 / 0).
+    The pooled variance splits exactly into two parts (law of total variance; every deal has the
+    same num_players scores, so the split holds with population variances):
+    - seat_variance: the mean, over deals, of the variance of one deal's rotation scores. Seat
+      luck: how much the seat changes the score within one deal. Pairing cancels it.
+    - deal_variance: the variance of the per-deal means. Deal luck: some deals suit the test agent
+      in every seat. Pairing cannot cancel it; it is what the paired evaluation sees.
+    A share near 0 can hide large seat luck, when deal luck is large enough to offset it.
+
+    Returns (share, sigma, seat_variance, deal_variance). sigma: sample stdev of the per-deal
+    rotation means, equal to the σ of M1's paired differences (subtracting the constant field share
+    does not change the spread). share is None when every score is equal (0 / 0).
     """
     if len(rotation_rows) < 2:
         raise ValueError("a variance needs at least 2 deals")
@@ -168,18 +221,22 @@ def deal_luck_share(rotation_rows):
     num_players = len(rotation_rows[0])
     all_scores = []
     deal_means = []
+    within_deal_variances = []
     for scores in rotation_rows:
         all_scores.extend(scores)
         deal_means.append(sum(scores) / num_players)
+        within_deal_variances.append(statistics.pvariance(scores))
 
     # The spread num_players unpaired hands would have, against the spread pairing leaves.
     unpaired_variance = statistics.pvariance(all_scores) / num_players
     paired_variance = statistics.pvariance(deal_means)
     sigma = statistics.stdev(deal_means)
+    seat_variance = statistics.mean(within_deal_variances)
 
     if unpaired_variance == 0:
-        return None, sigma
-    return 1 - paired_variance / unpaired_variance, sigma
+        return None, sigma, seat_variance, paired_variance
+    share = 1 - paired_variance / unpaired_variance
+    return share, sigma, seat_variance, paired_variance
 
 
 # Power-analysis multiplier: z for a two-sided 5% test (1.96) plus z for 80% power (0.84).
