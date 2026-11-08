@@ -1,0 +1,5 @@
+delta,sigma,deals_needed,source
+0.03,0.3756156108138839,1230,4p1d_deal-luck_heuristic-vs-greedy_dev_n1000_seed12.json
+0.05,0.3756156108138839,443,4p1d_deal-luck_heuristic-vs-greedy_dev_n1000_seed12.json
+0.1,0.3756156108138839,111,4p1d_deal-luck_heuristic-vs-greedy_dev_n1000_seed12.json
+0.2,0.3756156108138839,28,4p1d_deal-luck_heuristic-vs-greedy_dev_n1000_seed12.json

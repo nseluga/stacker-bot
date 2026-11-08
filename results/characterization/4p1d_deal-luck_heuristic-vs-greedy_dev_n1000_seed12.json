@@ -1,0 +1,18 @@
+{
+  "players": 4,
+  "test": "heuristic",
+  "field": "greedy",
+  "test_seats": [
+    0
+  ],
+  "deals": 1000,
+  "seed": 12,
+  "source": "dev",
+  "deal_luck_share": -0.026796170258491125,
+  "standard_deviation": 0.3756156108138839,
+  "mean_difference": 0.673,
+  "git_commit": "e12b575def77d2de7b1f43873425102860f3bd33",
+  "uncommitted_changes": true,
+  "play_seconds": 347.92,
+  "seconds_per_deal": 0.3479
+}

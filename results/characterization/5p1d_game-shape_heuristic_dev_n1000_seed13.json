@@ -1,0 +1,22 @@
+{
+  "players": 5,
+  "agent": "heuristic",
+  "hands": 1000,
+  "seed": 13,
+  "source": "dev",
+  "summary": {
+    "moves_mean": 47.683,
+    "moves_median": 47.0,
+    "moves_p10": 35.0,
+    "moves_p90": 62.0,
+    "legal_mean": 3.9876475892875867,
+    "legal_median": 2,
+    "legal_p90": 9.0,
+    "legal_max": 63,
+    "pass_rate": 0.6692115175569432
+  },
+  "git_commit": "e12b575def77d2de7b1f43873425102860f3bd33",
+  "uncommitted_changes": true,
+  "play_seconds": 551.3,
+  "seconds_per_hand": 0.5513
+}

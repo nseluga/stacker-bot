@@ -1,0 +1,22 @@
+{
+  "players": 8,
+  "agent": "greedy",
+  "hands": 1000,
+  "seed": 13,
+  "source": "dev",
+  "summary": {
+    "moves_mean": 144.777,
+    "moves_median": 145.0,
+    "moves_p10": 128.0,
+    "moves_p90": 161.1,
+    "legal_mean": 3.76300793634348,
+    "legal_median": 2,
+    "legal_p90": 9.0,
+    "legal_max": 127,
+    "pass_rate": 0.45977633745161145
+  },
+  "git_commit": "e12b575def77d2de7b1f43873425102860f3bd33",
+  "uncommitted_changes": true,
+  "play_seconds": 28.78,
+  "seconds_per_hand": 0.0288
+}

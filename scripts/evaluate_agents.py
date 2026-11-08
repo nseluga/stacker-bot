@@ -67,7 +67,9 @@ def select_deals(num_players, count, seed, confirm):
             raise ValueError(f"a confirm run uses a test seed {TEST_SEEDS}, got {seed}")
     else:
         if seed < DEV_SEED_MIN:
-            raise ValueError(f"dev runs use seeds ≥ {DEV_SEED_MIN}; 0–2 are test seeds, got {seed}")
+            raise ValueError(
+                f"dev runs use seeds ≥ {DEV_SEED_MIN}; 0–2 are test seeds, got {seed}"
+            )
 
     if confirm:
         sealed = load_sealed(num_players)
@@ -116,7 +118,9 @@ def main():
     parser.add_argument("--deals", type=int, required=True, help="number of deals N")
     parser.add_argument("--seed", type=int, required=True, help="dev: ≥ 10; confirm: 0, 1 or 2")
     parser.add_argument("--slug", required=True, help="results/<slug>/, a manifest slug")
-    parser.add_argument("--confirm", action="store_true", help="sealed deals; pre-registered runs only")
+    parser.add_argument(
+        "--confirm", action="store_true", help="sealed deals; pre-registered runs only"
+    )
     args = parser.parse_args()
 
     test_seats = []
