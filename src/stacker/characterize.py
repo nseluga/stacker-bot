@@ -7,8 +7,10 @@ Every game-shape number (legal moves per turn, moves per hand, pass rate) comes 
 """
 
 import math
+import multiprocessing
 import random
 import statistics
+import time
 from typing import NamedTuple
 
 from stacker.game import PASS, new_hand, play_out
@@ -200,3 +202,53 @@ def deals_needed(sigma, delta):
     if delta <= 0:
         raise ValueError(f"delta must be > 0, got {delta}")
     return math.ceil((POWER_MULTIPLIER * sigma / delta) ** 2)
+
+
+def play_for(num_players, agent, seconds, seed, worker):
+    """
+    One worker's share of decisions_per_second: plays fresh hands back to back, agent in every
+    seat, until seconds have passed, finishing the hand that crosses the deadline.
+    Hand i deals from random.Random(f"{seed}:{worker}:{i}"), so no two workers play the same hand.
+    Returns (decisions, hands, elapsed seconds). A decision is one move in a hand's trace.
+    """
+    decisions = 0
+    hands = 0
+    start = time.perf_counter()
+    # The check sits at the bottom, so seconds = 0 still plays exactly one hand.
+    while True:
+        rng = random.Random(f"{seed}:{worker}:{hands}")
+        agents = []
+        for _ in range(num_players):
+            agents.append(agent)
+        trace, _points = play_out(new_hand(num_players, rng), agents, rng)
+        decisions += len(trace)
+        hands += 1
+        if time.perf_counter() - start >= seconds:
+            break
+    return decisions, hands, time.perf_counter() - start
+
+
+def decisions_per_second(num_players, agent, seconds, processes, seed):
+    """
+    How many agent decisions per second this machine can play: the simulator ceiling for M3's
+    self-play actors, before a net's cost is added (stage plan characterization, piece 5).
+    agent must be a module-level function, because each worker process receives it by name.
+    seed: a dev seed (≥ 10, rule 2).
+
+    Mechanism: processes workers each run play_for for seconds. Each worker's rate is its own
+    decisions / its own elapsed time, and the machine's rate is their sum. Pool startup is left out
+    of every timing, since M3's actors start once and then run for hours.
+    Returns (decisions per second, hands per second, per-worker (decisions, hands, seconds) list).
+    """
+    jobs = []
+    for worker in range(processes):
+        jobs.append((num_players, agent, seconds, seed, worker))
+    with multiprocessing.Pool(processes) as pool:
+        per_worker = pool.starmap(play_for, jobs)
+
+    decision_rate = 0
+    hand_rate = 0
+    for decisions, hands, elapsed in per_worker:
+        decision_rate += decisions / elapsed
+        hand_rate += hands / elapsed
+    return decision_rate, hand_rate, per_worker

@@ -13,7 +13,9 @@ from stacker.characterize import (
     counting_agent,
     deal_luck_share,
     deals_needed,
+    decisions_per_second,
     game_shape,
+    play_for,
 )
 from stacker.game import PASS, new_hand, play_out
 
@@ -190,3 +192,58 @@ def test_deals_needed_matches_the_m1_confirm():
     # Halving δ quadruples N (before rounding up).
     assert deals_needed(1.0, 0.5) == 32
     assert deals_needed(1.0, 0.25) == 126
+
+
+def test_play_for_gives_each_worker_its_own_hands():
+    # seconds = 0 plays exactly one hand: hand 0 of that worker, dealt from f"{seed}:{worker}:0".
+    for worker in (0, 1):
+        decisions, hands, _elapsed = play_for(NUM_PLAYERS, greedy_agent, 0, TEST_SEED, worker)
+        rng = random.Random(f"{TEST_SEED}:{worker}:0")
+        trace, _points = play_out(new_hand(NUM_PLAYERS, rng), [greedy_agent] * NUM_PLAYERS, rng)
+        assert hands == 1
+        assert decisions == len(trace)
+
+
+def test_decisions_per_second_sums_two_workers():
+    decision_rate, hand_rate, per_worker = decisions_per_second(
+        NUM_PLAYERS, greedy_agent, 0.5, 2, TEST_SEED
+    )
+    assert len(per_worker) == 2
+    assert decision_rate > hand_rate > 0
+
+
+def run_throughput(arguments):
+    """Runs scripts/throughput.py as a user would; returns the finished process."""
+    repo_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repo_root / "src")
+    command = [sys.executable, str(repo_root / "scripts" / "throughput.py")]
+    command.extend(arguments)
+    return subprocess.run(command, cwd=repo_root, env=environment, capture_output=True, text=True)
+
+
+def test_throughput_script_writes_one_row_per_process_count(tmp_path):
+    finished = run_throughput(
+        ["--players", "4", "--agent", "greedy", "--seconds", "0.3", "--processes", "1,2",
+         "--seed", "13", "--out-dir", str(tmp_path)]
+    )
+    assert finished.returncode == 0, finished.stderr
+    written = list(tmp_path.iterdir())
+    assert len(written) == 1
+    with open(written[0]) as file:
+        record = json.load(file)
+    process_counts = []
+    for row in record["rows"]:
+        process_counts.append(row["processes"])
+    assert process_counts == [1, 2]
+    assert len(record["rows"][1]["workers"]) == 2
+
+
+def test_throughput_script_refuses_a_test_seed(tmp_path):
+    # Rule 2: seed 2 is a test seed, so the run stops before playing anything.
+    finished = run_throughput(
+        ["--players", "4", "--agent", "greedy", "--seconds", "0.3", "--processes", "1",
+         "--seed", "2", "--out-dir", str(tmp_path)]
+    )
+    assert finished.returncode != 0
+    assert list(tmp_path.iterdir()) == []

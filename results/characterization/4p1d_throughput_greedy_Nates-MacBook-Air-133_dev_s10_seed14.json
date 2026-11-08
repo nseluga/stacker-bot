@@ -1,0 +1,103 @@
+{
+  "players": 4,
+  "agent": "greedy",
+  "seconds": 10.0,
+  "seed": 14,
+  "source": "dev",
+  "machine": "Nates-MacBook-Air-133",
+  "cpu_count": 8,
+  "python": "3.15.0",
+  "rows": [
+    {
+      "processes": 1,
+      "decisions_per_second": 37681.2,
+      "hands_per_second": 581.51,
+      "decisions_per_second_per_process": 37681.2,
+      "workers": [
+        {
+          "decisions": 376872,
+          "hands": 5816,
+          "seconds": 10.002
+        }
+      ]
+    },
+    {
+      "processes": 4,
+      "decisions_per_second": 125791.9,
+      "hands_per_second": 1943.63,
+      "decisions_per_second_per_process": 31448.0,
+      "workers": [
+        {
+          "decisions": 314207,
+          "hands": 4850,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 313039,
+          "hands": 4843,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 313169,
+          "hands": 4838,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 317615,
+          "hands": 4907,
+          "seconds": 10.0
+        }
+      ]
+    },
+    {
+      "processes": 8,
+      "decisions_per_second": 145285.4,
+      "hands_per_second": 2245.34,
+      "decisions_per_second_per_process": 18160.7,
+      "workers": [
+        {
+          "decisions": 181227,
+          "hands": 2804,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 181708,
+          "hands": 2808,
+          "seconds": 10.003
+        },
+        {
+          "decisions": 183232,
+          "hands": 2832,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 185903,
+          "hands": 2873,
+          "seconds": 10.002
+        },
+        {
+          "decisions": 177799,
+          "hands": 2741,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 178167,
+          "hands": 2756,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 177792,
+          "hands": 2751,
+          "seconds": 10.001
+        },
+        {
+          "decisions": 187260,
+          "hands": 2892,
+          "seconds": 10.0
+        }
+      ]
+    }
+  ],
+  "git_commit": "0eaeae8bac38502b4fb6a6345282c0852597e6f2",
+  "uncommitted_changes": true
+}
