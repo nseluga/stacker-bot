@@ -9,14 +9,20 @@
     "moves_median": 99.0,
     "moves_p10": 75.0,
     "moves_p90": 130.0,
+    "moves_p99": 160.0,
+    "moves_max": 184,
     "legal_mean": 4.9771241186434,
     "legal_median": 2.0,
     "legal_p90": 11.0,
     "legal_max": 257,
-    "pass_rate": 0.7448239308311525
+    "pass_rate": 0.7448239308311525,
+    "forced_share": 0.4081222673021625,
+    "choice_pass_rate": 0.5341490948675564,
+    "choice_legal_mean": 7.719502861706376,
+    "choice_legal_p90": 14.0
   },
-  "git_commit": "e12b575def77d2de7b1f43873425102860f3bd33",
-  "uncommitted_changes": true,
-  "play_seconds": 1660.22,
-  "seconds_per_hand": 1.6602
+  "git_commit": "29e47010688c8adc9d9a2ac359e29fba10fcc032",
+  "uncommitted_changes": false,
+  "play_seconds": 796.06,
+  "seconds_per_hand": 0.7961
 }

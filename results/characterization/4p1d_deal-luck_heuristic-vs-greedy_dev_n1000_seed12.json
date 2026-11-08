@@ -13,8 +13,8 @@
   "seat_variance": 0.408125,
   "deal_variance": 0.140946,
   "mean_difference": 0.673,
-  "git_commit": "729dc3255c1b7f9e750eabda2bbfe6e0e711b959",
-  "uncommitted_changes": true,
-  "play_seconds": 264.95,
-  "seconds_per_deal": 0.265
+  "git_commit": "29e47010688c8adc9d9a2ac359e29fba10fcc032",
+  "uncommitted_changes": false,
+  "play_seconds": 255.97,
+  "seconds_per_deal": 0.256
 }
