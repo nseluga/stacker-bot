@@ -1,4 +1,20 @@
-# Test settings only: pytest imports the package from src/ and the test helpers from tests/.
+# Dependencies, so the laptop and teapot build the same environment from uv.lock (`uv sync`).
+# There is no [build-system] table on purpose: uv then installs only the dependencies, and
+# the code is still imported from src/ by path (pytest settings below).
+[project]
+name = "stacker-bot"
+version = "0.0.0"
+requires-python = ">=3.15,<3.16"
+dependencies = [
+    # Exact pins match the environment that produced the M1 and M2 results.
+    "numpy==2.5.4",
+    "matplotlib==3.11.2",
+    "pytest==9.1.1",
+    # Added at M3 stage 2 for the Q-net; uv.lock fixes the patch version.
+    "torch==2.15.*",
+]
+
+# Test settings: pytest imports the package from src/ and the test helpers from tests/.
 [tool.pytest.ini_options]
 pythonpath = ["src", "tests"]
 testpaths = ["tests"]
