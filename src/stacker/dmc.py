@@ -17,9 +17,16 @@ pieces, in build order:
   toward the score its hand gave. The size of one change is capped (gradient clipping).
 - The loop, one process: train_one_process alternates the two, playing hands until a batch of
   samples is full and then updating. One seed replays it exactly.
+- The loop, many processes: actor_loop is what one actor process runs. It plays hands with a
+  net it shares with the learner and sends each hand's samples to the learner through a queue.
+  train starts the actors, cuts batches from the queue, updates, and after every update copies
+  the new weights into the shared net. It writes a log line per update and saves checkpoints.
 """
 
+import json
 import random
+import time
+from pathlib import Path
 
 import torch
 
@@ -45,6 +52,19 @@ RMSPROP_MOMENTUM = 0.0
 
 # M3 trains a specialist for one config: 4 players, 1 deck.
 NUM_PLAYERS = 4
+
+# Samples in one update: DouZero's --batch_size 32 times --unroll_length 100.
+SAMPLES_PER_UPDATE = 3200
+# Finished hands the queue holds before actors must wait. At about 68 samples a hand this is
+# about 1.4 updates' worth, close to DouZero's 50 buffers of 100 steps (1.5), so queued samples
+# are at most a couple of updates older than the weights. About 64 MB when full.
+QUEUE_MAX_HANDS = 64
+# Longest the learner waits for one hand before the run fails. A hand takes well under a second,
+# so a wait this long means the actors have died, and stopping beats hanging without a word.
+QUEUE_TIMEOUT_SECONDS = 60
+# Updates between saved checkpoints. A placeholder: stage 4 sets it from the probe's updates
+# per hour.
+CHECKPOINT_EVERY_UPDATES = 100
 
 
 def choose_action(q_net, decision, epsilon, rng):
@@ -230,3 +250,161 @@ def train_one_process(seed, num_updates, samples_per_update):
         waiting_samples = waiting_samples[samples_per_update:]
         results.append(learner_step(q_net, optimizer, batch))
     return results
+
+
+def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon):
+    """
+    Plays hands forever and queues their samples: the target function of one actor process
+    (spec parts 7-8). Never returns; the process that started it ends it.
+    actor_id: int, this actor's number, from 0. seed: int, the run's seed.
+    actor_net: a QNet whose weights are in shared memory. The learner writes new weights into
+      that memory, so this actor's next forward pass uses them without being told.
+    sample_queue: a bounded multiprocessing queue. Each item put on it is (actor_id, samples):
+      the samples of one finished hand, as self_play_hand gives them.
+    epsilon: exploration probability, passed to self_play_hand.
+    """
+    # By default torch spreads one forward pass over every core. With one actor process per
+    # core that would be many times more threads than cores, each waiting on the others.
+    torch.set_num_threads(1)
+
+    hands_played = 0
+    while True:
+        # One rng per hand, named by seed, actor and hand number: no two actors of a run, and
+        # no two runs, play the same deal. The "train:" prefix keeps the string different from
+        # every evaluation stream.
+        hand_rng = random.Random(f"train:{seed}:{actor_id}:{hands_played}")
+        state = new_hand(NUM_PLAYERS, hand_rng)
+        # The learner may be writing new weights while this hand is played, with no lock, as
+        # in DouZero: a decision can be scored by a mix of the old and new weights, which
+        # differ by one small update.
+        samples, _ = self_play_hand(state, actor_net, epsilon, hand_rng)
+
+        # put waits while the queue is full. That wait is the brake: actors cannot make
+        # samples faster than the learner uses them and fill memory.
+        # ponytail: the queue copies each hand's samples (about 1 MB) to the learner process.
+        # DouZero avoids the copy with shared-memory buffers; switch if the throughput probe
+        # shows the queue is the bottleneck.
+        sample_queue.put((actor_id, samples))
+        hands_played += 1
+
+
+def train(
+    seed,
+    num_actors,
+    run_dir,
+    num_updates,
+    samples_per_update=SAMPLES_PER_UPDATE,
+    checkpoint_every=CHECKPOINT_EVERY_UPDATES,
+):
+    """
+    Runs the training loop with actors in their own processes (spec parts 7-9).
+    seed: int; fixes the starting weights and every actor's hands. The run is still not
+      repeatable bit for bit: which actor's hand reaches the queue first depends on timing.
+    num_actors: how many actor processes to start.
+    run_dir: path of the run's directory, created if missing. It gets log.jsonl, one line per
+      update, and checkpoint_<updates done>.pt files, each a QNet state_dict. A directory that
+      already has a log.jsonl is an earlier run and is refused (FileExistsError).
+    num_updates: how many learner_step calls to make.
+    samples_per_update: batch size B of each update.
+    checkpoint_every: a checkpoint is saved after every this many updates, and after the last.
+    Returns (q_net, actor_net): the trained learner net and the shared net the actors played
+      with, which holds the same weights.
+    Must be called under `if __name__ == "__main__":` in a script: each actor process starts by
+      importing the script again.
+    """
+    # QNet() draws its starting weights from torch's global random stream, so seeding that
+    # stream first fixes them.
+    torch.manual_seed(seed)
+    q_net = QNet()
+    optimizer = torch.optim.RMSprop(
+        q_net.parameters(),
+        lr=LEARNING_RATE,
+        alpha=RMSPROP_ALPHA,
+        eps=RMSPROP_EPS,
+        momentum=RMSPROP_MOMENTUM,
+    )
+
+    # The actors' net: the same weights as the learner's, moved to memory that every process
+    # can read. Actors get a handle to that memory, not a copy of the weights.
+    actor_net = QNet()
+    actor_net.load_state_dict(q_net.state_dict())
+    actor_net.share_memory()
+
+    # The directory may exist already: the training script makes it first, to write the run's
+    # config. A log in it means an earlier run, which is kept, so stop before any actor starts.
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "log.jsonl"
+    if log_path.exists():
+        raise FileExistsError(f"{log_path} exists: an earlier run is in this directory")
+
+    # "spawn" starts each actor as a fresh Python process. The other way, "fork", copies this
+    # process while torch's threads may hold locks, and the copy can then wait on them forever.
+    # torch's multiprocessing is the standard library's, plus passing shared tensors by handle.
+    context = torch.multiprocessing.get_context("spawn")
+    sample_queue = context.Queue(maxsize=QUEUE_MAX_HANDS)
+    actors = []
+    for actor_id in range(num_actors):
+        # daemon: the actor is ended with this process, even if the cleanup below never runs.
+        actor = context.Process(
+            target=actor_loop,
+            args=(actor_id, seed, actor_net, sample_queue, EPSILON),
+            daemon=True,
+        )
+        actor.start()
+        actors.append(actor)
+
+    # Samples received but not yet trained on; what is left after a batch starts the next one.
+    waiting_samples = []
+    samples_by_actor = []
+    for _ in range(num_actors):
+        samples_by_actor.append(0)
+
+    try:
+        # "x": create the file, and fail if it is there after all.
+        with open(log_path, "x") as log_file:
+            for update_index in range(num_updates):
+                update_start = time.perf_counter()
+                while len(waiting_samples) < samples_per_update:
+                    # Raises queue.Empty after the timeout: see QUEUE_TIMEOUT_SECONDS.
+                    actor_id, samples = sample_queue.get(timeout=QUEUE_TIMEOUT_SECONDS)
+                    waiting_samples.extend(samples)
+                    samples_by_actor[actor_id] += len(samples)
+                batch = waiting_samples[:samples_per_update]
+                waiting_samples = waiting_samples[samples_per_update:]
+
+                learner_start = time.perf_counter()
+                loss, gradient_norm = learner_step(q_net, optimizer, batch)
+
+                # Equation 12: write the new weights into the shared memory, in place, so every
+                # actor's next forward pass uses them.
+                actor_net.load_state_dict(q_net.state_dict())
+                update_end = time.perf_counter()
+
+                # wait_seconds is time spent short of samples (the actors are the limit);
+                # learner_seconds is the update and the copy (the learner is the limit).
+                # Whichever is larger names the bottleneck.
+                updates_done = update_index + 1
+                log_line = {
+                    "update": updates_done,
+                    "loss": loss,
+                    "gradient_norm": gradient_norm,
+                    "wait_seconds": learner_start - update_start,
+                    "learner_seconds": update_end - learner_start,
+                    "samples_per_second": samples_per_update / (update_end - update_start),
+                    "samples_by_actor": list(samples_by_actor),
+                }
+                log_file.write(json.dumps(log_line) + "\n")
+                # flush: the line is on disk now, so a run that dies keeps its log so far.
+                log_file.flush()
+
+                if updates_done % checkpoint_every == 0 or updates_done == num_updates:
+                    torch.save(q_net.state_dict(), run_dir / f"checkpoint_{updates_done:06d}.pt")
+    finally:
+        # Reached on success, on an error and on Ctrl-C: no actor outlives the run. An actor
+        # never returns by itself, so it is ended from here.
+        for actor in actors:
+            actor.terminate()
+        for actor in actors:
+            actor.join()
+    return q_net, actor_net

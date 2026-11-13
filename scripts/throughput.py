@@ -1,6 +1,8 @@
 """
 Simulator throughput: agent decisions per second on this machine (architecture plan §5 M2; stage
-plan characterization, piece 5). The ceiling for M3's self-play actors before a net's cost.
+plan characterization, piece 5). With --agent greedy it is the engine's ceiling for M3's
+self-play actors before a net's cost; with --agent net it is the actors' ceiling with the net's
+cost in (stage plan specialist_explore, stage 3 piece 11).
 
 Runs stacker.characterize.decisions_per_second once per process count in --processes and writes
 one JSON for the sweep. Exploration only (rule 2): dev seeds ≥ 10.
@@ -20,14 +22,47 @@ import socket
 import time
 from pathlib import Path
 
+import torch
 from evaluate_agents import AGENTS, DEV_SEED_MIN, RESULTS_ROOT, git_state
 
 from stacker.characterize import decisions_per_second
+from stacker.dmc import EPSILON, choose_action
+from stacker.encode import encode_decision
+from stacker.net import QNet
 from stacker.sealed import config_name
 
-# Greedy costs almost nothing per decision, so the timing is the engine's (stage plan piece 5).
-# ponytail: greedy only; open the choice when the net exists and M3 measures actor cost.
-THROUGHPUT_AGENTS = ("greedy",)
+# Seed for the timing net's starting weights. The weights' values do not change how long a
+# forward pass takes; the seed only makes every worker and every run time the same net.
+NET_SEED = DEV_SEED_MIN
+
+# The net net_agent plays with: one per worker process, built on its first call there. An agent
+# is called as agent(observation, actions, rng), with no place to pass a net in, and the
+# parent process must not build one: it would have to be copied to every worker.
+worker_net = None
+
+
+def net_agent(observation, actions, rng):
+    """
+    Picks an action the way a training actor does, for timing: encode the decision, then
+    choose_action with an untrained QNet at the training epsilon.
+    observation, actions, rng: as play_out passes them. Returns one of actions.
+    Left out, so the rate is the actors' ceiling: storing the sample and sending it to the
+    learner.
+    """
+    global worker_net
+    if worker_net is None:
+        # One thread per worker, as in actor_loop: the workers already fill the cores.
+        torch.set_num_threads(1)
+        torch.manual_seed(NET_SEED)
+        worker_net = QNet()
+    decision = encode_decision(observation, actions)
+    index = choose_action(worker_net, decision, EPSILON, rng)
+    return actions[index]
+
+
+# Greedy costs almost nothing per decision, so its timing is the engine's (stage plan
+# characterization, piece 5). Net adds what an actor pays per decision at M3.
+THROUGHPUT_AGENTS = {"greedy": AGENTS["greedy"], "net": net_agent}
 
 DEFAULT_OUT_DIR = RESULTS_ROOT / "characterization"
 
@@ -36,7 +71,7 @@ def main():
     """Parses the command line, runs one measurement per process count, writes the sweep JSON."""
     parser = argparse.ArgumentParser(description="Agent decisions per second on this machine.")
     parser.add_argument("--players", type=int, required=True, help="3 to 8")
-    parser.add_argument("--agent", choices=THROUGHPUT_AGENTS, required=True)
+    parser.add_argument("--agent", choices=sorted(THROUGHPUT_AGENTS), required=True)
     parser.add_argument("--seconds", type=float, required=True, help="per worker, per row")
     parser.add_argument("--processes", required=True, help="process counts, e.g. 1,4,8")
     parser.add_argument("--seed", type=int, required=True, help=f"dev seed, ≥ {DEV_SEED_MIN}")
@@ -69,7 +104,7 @@ def main():
         load_one_minute = os.getloadavg()[0]
         start = time.perf_counter()
         decision_rate, hand_rate, per_worker = decisions_per_second(
-            args.players, AGENTS[args.agent], args.seconds, processes, args.seed
+            args.players, THROUGHPUT_AGENTS[args.agent], args.seconds, processes, args.seed
         )
         # Wall time includes pool start; it checks that workers' timed windows overlapped.
         wall_seconds = time.perf_counter() - start
