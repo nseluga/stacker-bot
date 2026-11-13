@@ -15,7 +15,9 @@ CPU counts, Python version, one row per process count with load and wall time, g
 """
 
 import argparse
+import functools
 import json
+import multiprocessing
 import os
 import platform
 import random
@@ -44,32 +46,66 @@ from stacker.net import QNet
 from stacker.sealed import config_name
 
 # Seed for the timing net's starting weights. The weights' values do not change how long a
-# forward pass takes; the seed only makes every worker and every run time the same net.
+# forward pass takes; the seed only makes every run time the same net.
 NET_SEED = DEV_SEED_MIN
 
-# The net net_agent plays with: one per worker process, built on its first call there. An agent
-# is called as agent(observation, actions, rng), with no place to pass a net in, and the
-# parent process must not build one: it would have to be copied to every worker.
-worker_net = None
+# What write_mark puts in the net's first weight. No seeded weight has this value, so reading
+# it back in the parent can only mean the worker wrote into the parent's memory.
+SHARING_MARK = 12345.0
 
 
-def net_agent(observation, actions, rng):
+def net_agent(net, observation, actions, rng):
     """
     Picks an action the way a training actor does, for timing: encode the decision, then
     choose_action with an untrained QNet at the training epsilon.
+    net: the QNet every worker reads, weights in shared memory. main binds it with
+    functools.partial, since play_out calls an agent as agent(observation, actions, rng).
     observation, actions, rng: as play_out passes them. Returns one of actions.
     Left out, so the rate is the actors' ceiling: storing the sample and sending it to the
     learner.
     """
-    global worker_net
-    if worker_net is None:
-        # One thread per worker, as in actor_loop: the workers already fill the cores.
+    # One thread per worker, as in actor_loop: the workers already fill the cores. A fresh
+    # worker starts with torch's default count, so this sets it on the worker's first decision.
+    if torch.get_num_threads() != 1:
         torch.set_num_threads(1)
-        torch.manual_seed(NET_SEED)
-        worker_net = QNet()
     decision = encode_decision(observation, actions)
-    index = choose_action(worker_net, decision, EPSILON, rng)
+    index = choose_action(net, decision, EPSILON, rng)
     return actions[index]
+
+
+def write_mark(net):
+    """Runs in a worker process: overwrites the first number of net's first weight tensor."""
+    with torch.no_grad():
+        next(net.parameters()).view(-1)[0] = SHARING_MARK
+
+
+def shared_timing_net():
+    """
+    Builds the one QNet all net workers read, weights in shared memory, and checks that a
+    worker process really gets the parent's memory, not a copy. Returns the net.
+
+    Why one copy: training actors share theirs (stacker.dmc.train). With a private 9 MB copy
+    per worker, workers push each other's weights out of the CPU cache they share, and the
+    rate at 24 workers on teapot reads half of what shared weights give (2026-11-12).
+
+    The check: a worker writes SHARING_MARK into the first weight; the parent then reads its
+    own net. A copy in the worker would leave the parent's value unchanged.
+    """
+    torch.manual_seed(NET_SEED)
+    net = QNet()
+    # Moves every weight tensor into shared memory; sending the net to a worker then sends a
+    # handle to that memory (torch registers this with multiprocessing on import).
+    net.share_memory()
+
+    first_weight = next(net.parameters()).view(-1)
+    original = first_weight[0].item()
+    with multiprocessing.Pool(1) as pool:
+        pool.apply(write_mark, (net,))
+    if first_weight[0].item() != SHARING_MARK:
+        raise SystemExit("net weights are not shared: a worker's write did not reach the parent")
+    with torch.no_grad():
+        first_weight[0] = original
+    return net
 
 
 def learner_samples_per_second(num_players, seed, seconds):
@@ -118,8 +154,9 @@ def learner_samples_per_second(num_players, seed, seconds):
 
 
 # Greedy costs almost nothing per decision, so its timing is the engine's (stage plan
-# characterization, piece 5). Net adds what an actor pays per decision at M3.
-THROUGHPUT_AGENTS = {"greedy": AGENTS["greedy"], "net": net_agent}
+# characterization, piece 5). Net adds what an actor pays per decision at M3; main binds the
+# shared net to net_agent.
+THROUGHPUT_AGENTS = ("greedy", "net")
 
 DEFAULT_OUT_DIR = RESULTS_ROOT / "characterization"
 
@@ -131,7 +168,7 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Agent decisions per second on this machine.")
     parser.add_argument("--players", type=int, required=True, help="3 to 8")
-    parser.add_argument("--agent", choices=sorted(THROUGHPUT_AGENTS), required=True)
+    parser.add_argument("--agent", choices=THROUGHPUT_AGENTS, required=True)
     parser.add_argument("--seconds", type=float, required=True, help="per worker, per row")
     parser.add_argument("--processes", required=True, help="process counts, e.g. 1,4,8")
     parser.add_argument("--seed", type=int, required=True, help=f"dev seed, ≥ {DEV_SEED_MIN}")
@@ -159,6 +196,14 @@ def main():
         f"_dev_s{seconds_label}_seed{args.seed}"
     )
 
+    if args.agent == "net":
+        # partial is sent to each worker with the net inside it: as a handle, not a copy.
+        agent = functools.partial(net_agent, shared_timing_net())
+        net_weights = "shared"
+    else:
+        agent = AGENTS[args.agent]
+        net_weights = None
+
     # Repeats are the outer loop: every process count is measured once, then all of them again.
     # A slow stretch on the machine (other users, heat) then lands on one repeat of every row,
     # not on all repeats of one row.
@@ -169,7 +214,7 @@ def main():
             load_one_minute = os.getloadavg()[0]
             start = time.perf_counter()
             decision_rate, hand_rate, per_worker = decisions_per_second(
-                args.players, THROUGHPUT_AGENTS[args.agent], args.seconds, processes, args.seed
+                args.players, agent, args.seconds, processes, args.seed
             )
             # Wall time includes pool start; it checks that workers' timed windows overlapped.
             wall_seconds = time.perf_counter() - start
@@ -232,6 +277,9 @@ def main():
     record = {
         "players": args.players,
         "agent": args.agent,
+        # "shared": every net worker read one copy of the weights. Files without this field
+        # (before 2026-11-12) gave each worker a private copy.
+        "net_weights": net_weights,
         "seconds": args.seconds,
         "seed": args.seed,
         "repeats": args.repeats,

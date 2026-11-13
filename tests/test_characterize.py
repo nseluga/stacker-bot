@@ -280,6 +280,7 @@ def test_throughput_script_writes_one_row_per_process_count(tmp_path):
     for row in record["rows"]:
         assert row["repeat"] == 1
     assert record["learner"] == []
+    assert record["net_weights"] is None
 
 
 def test_throughput_script_times_the_net_and_the_learner_per_repeat(tmp_path):
@@ -293,6 +294,10 @@ def test_throughput_script_times_the_net_and_the_learner_per_repeat(tmp_path):
     assert len(written) == 1
     with open(written[0]) as file:
         record = json.load(file)
+
+    # The script stops before timing if a worker gets a copy of the weights, so a written
+    # record means its own sharing check passed.
+    assert record["net_weights"] == "shared"
 
     # One row per repeat of the one process count, numbered from 1.
     repeats = []

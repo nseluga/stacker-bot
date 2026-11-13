@@ -1,0 +1,336 @@
+{
+  "players": 4,
+  "agent": "net",
+  "seconds": 10.0,
+  "seed": 14,
+  "repeats": 3,
+  "source": "dev",
+  "machine": "Nates-MacBook-Air-133",
+  "cpu_count": 8,
+  "usable_cpus": null,
+  "python": "3.15.0",
+  "rows": [
+    {
+      "processes": 1,
+      "repeat": 1,
+      "load_one_minute_before": 4.27,
+      "wall_seconds": 10.646,
+      "decisions_per_second": 2242.6,
+      "hands_per_second": 31.97,
+      "decisions_per_second_per_process": 2242.6,
+      "workers": [
+        {
+          "decisions": 22449,
+          "hands": 320,
+          "seconds": 10.01
+        }
+      ]
+    },
+    {
+      "processes": 4,
+      "repeat": 1,
+      "load_one_minute_before": 3.92,
+      "wall_seconds": 10.98,
+      "decisions_per_second": 2318.0,
+      "hands_per_second": 33.22,
+      "decisions_per_second_per_process": 579.5,
+      "workers": [
+        {
+          "decisions": 5842,
+          "hands": 84,
+          "seconds": 10.013
+        },
+        {
+          "decisions": 5721,
+          "hands": 82,
+          "seconds": 10.035
+        },
+        {
+          "decisions": 5850,
+          "hands": 84,
+          "seconds": 10.024
+        },
+        {
+          "decisions": 5825,
+          "hands": 83,
+          "seconds": 10.029
+        }
+      ]
+    },
+    {
+      "processes": 8,
+      "repeat": 1,
+      "load_one_minute_before": 4.33,
+      "wall_seconds": 11.381,
+      "decisions_per_second": 2360.2,
+      "hands_per_second": 33.89,
+      "decisions_per_second_per_process": 295.0,
+      "workers": [
+        {
+          "decisions": 3013,
+          "hands": 43,
+          "seconds": 10.017
+        },
+        {
+          "decisions": 2858,
+          "hands": 41,
+          "seconds": 10.04
+        },
+        {
+          "decisions": 3017,
+          "hands": 44,
+          "seconds": 10.05
+        },
+        {
+          "decisions": 3150,
+          "hands": 45,
+          "seconds": 10.014
+        },
+        {
+          "decisions": 2902,
+          "hands": 41,
+          "seconds": 10.025
+        },
+        {
+          "decisions": 2998,
+          "hands": 44,
+          "seconds": 10.058
+        },
+        {
+          "decisions": 2792,
+          "hands": 40,
+          "seconds": 10.019
+        },
+        {
+          "decisions": 2950,
+          "hands": 42,
+          "seconds": 10.041
+        }
+      ]
+    },
+    {
+      "processes": 1,
+      "repeat": 2,
+      "load_one_minute_before": 6.49,
+      "wall_seconds": 10.764,
+      "decisions_per_second": 2266.8,
+      "hands_per_second": 32.29,
+      "decisions_per_second_per_process": 2266.8,
+      "workers": [
+        {
+          "decisions": 22676,
+          "hands": 323,
+          "seconds": 10.003
+        }
+      ]
+    },
+    {
+      "processes": 4,
+      "repeat": 2,
+      "load_one_minute_before": 5.88,
+      "wall_seconds": 10.841,
+      "decisions_per_second": 2401.3,
+      "hands_per_second": 34.47,
+      "decisions_per_second_per_process": 600.3,
+      "workers": [
+        {
+          "decisions": 6061,
+          "hands": 88,
+          "seconds": 10.033
+        },
+        {
+          "decisions": 6023,
+          "hands": 86,
+          "seconds": 10.056
+        },
+        {
+          "decisions": 6063,
+          "hands": 87,
+          "seconds": 10.026
+        },
+        {
+          "decisions": 5959,
+          "hands": 85,
+          "seconds": 10.041
+        }
+      ]
+    },
+    {
+      "processes": 8,
+      "repeat": 2,
+      "load_one_minute_before": 5.75,
+      "wall_seconds": 11.49,
+      "decisions_per_second": 2551.0,
+      "hands_per_second": 36.64,
+      "decisions_per_second_per_process": 318.9,
+      "workers": [
+        {
+          "decisions": 3230,
+          "hands": 46,
+          "seconds": 10.044
+        },
+        {
+          "decisions": 3202,
+          "hands": 46,
+          "seconds": 10.132
+        },
+        {
+          "decisions": 3285,
+          "hands": 48,
+          "seconds": 10.128
+        },
+        {
+          "decisions": 3227,
+          "hands": 46,
+          "seconds": 10.149
+        },
+        {
+          "decisions": 3286,
+          "hands": 47,
+          "seconds": 10.125
+        },
+        {
+          "decisions": 3129,
+          "hands": 46,
+          "seconds": 10.085
+        },
+        {
+          "decisions": 3159,
+          "hands": 45,
+          "seconds": 10.079
+        },
+        {
+          "decisions": 3240,
+          "hands": 46,
+          "seconds": 10.036
+        }
+      ]
+    },
+    {
+      "processes": 1,
+      "repeat": 3,
+      "load_one_minute_before": 7.24,
+      "wall_seconds": 10.748,
+      "decisions_per_second": 2228.6,
+      "hands_per_second": 31.74,
+      "decisions_per_second_per_process": 2228.6,
+      "workers": [
+        {
+          "decisions": 22326,
+          "hands": 318,
+          "seconds": 10.018
+        }
+      ]
+    },
+    {
+      "processes": 4,
+      "repeat": 3,
+      "load_one_minute_before": 6.36,
+      "wall_seconds": 10.967,
+      "decisions_per_second": 2575.7,
+      "hands_per_second": 36.9,
+      "decisions_per_second_per_process": 643.9,
+      "workers": [
+        {
+          "decisions": 6481,
+          "hands": 94,
+          "seconds": 10.018
+        },
+        {
+          "decisions": 6372,
+          "hands": 91,
+          "seconds": 10.062
+        },
+        {
+          "decisions": 6551,
+          "hands": 94,
+          "seconds": 10.069
+        },
+        {
+          "decisions": 6491,
+          "hands": 92,
+          "seconds": 10.066
+        }
+      ]
+    },
+    {
+      "processes": 8,
+      "repeat": 3,
+      "load_one_minute_before": 5.92,
+      "wall_seconds": 11.289,
+      "decisions_per_second": 2740.7,
+      "hands_per_second": 39.47,
+      "decisions_per_second_per_process": 342.6,
+      "workers": [
+        {
+          "decisions": 3522,
+          "hands": 51,
+          "seconds": 10.098
+        },
+        {
+          "decisions": 3344,
+          "hands": 48,
+          "seconds": 10.064
+        },
+        {
+          "decisions": 3488,
+          "hands": 51,
+          "seconds": 10.093
+        },
+        {
+          "decisions": 3608,
+          "hands": 51,
+          "seconds": 10.041
+        },
+        {
+          "decisions": 3418,
+          "hands": 49,
+          "seconds": 10.079
+        },
+        {
+          "decisions": 3401,
+          "hands": 50,
+          "seconds": 10.087
+        },
+        {
+          "decisions": 3287,
+          "hands": 47,
+          "seconds": 10.005
+        },
+        {
+          "decisions": 3501,
+          "hands": 50,
+          "seconds": 10.006
+        }
+      ]
+    }
+  ],
+  "learner": [
+    {
+      "repeat": 1,
+      "load_one_minute_before": 6.64,
+      "torch_threads": 4,
+      "samples_per_second": 20508.9,
+      "updates": 65,
+      "seconds": 10.142
+    },
+    {
+      "repeat": 2,
+      "load_one_minute_before": 6.15,
+      "torch_threads": 4,
+      "samples_per_second": 20495.6,
+      "updates": 65,
+      "seconds": 10.149
+    },
+    {
+      "repeat": 3,
+      "load_one_minute_before": 5.53,
+      "torch_threads": 4,
+      "samples_per_second": 20702.6,
+      "updates": 65,
+      "seconds": 10.047
+    }
+  ],
+  "git_commit": "11dad47541477b4b338659b63cb1cd5dce409d9b",
+  "uncommitted_changes": false
+}
