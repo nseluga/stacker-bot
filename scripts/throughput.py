@@ -266,7 +266,8 @@ def main():
 
     commit, uncommitted_changes = git_state()
 
-    # CPUs this process may run on: an account limit can be below cpu_count (teapot: 39 of 48).
+    # CPUs this process may run on: can be below cpu_count (teapot: 39 of 48, a quota shared by
+    # all users, so other jobs take from it).
     # sched_getaffinity is Linux only, so macOS records None.
     # ponytail: physical-core layout (lscpu) is cited in the log, not recorded here.
     if hasattr(os, "sched_getaffinity"):

@@ -7,10 +7,12 @@ The samples: every decision of a hand is stored, forced ones included; each stor
 the action that was played; each return is the deciding seat's own final score.
 The batch: one action row per sample (K = 1), returns with one axis.
 The update: the loss falls on a fixed batch; one step moves every parameter; a gradient longer
-than MAX_GRAD_NORM is cut to exactly that length.
-The loop: the same seed gives the same result; another seed does not.
+than MAX_GRAD_NORM is cut to exactly that length; gradients left from an earlier update are
+cleared first.
+The loop: the same seed gives the same result; another seed does not; no sample is trained on
+twice.
 The streams: a training hand's rng name uses the seed, the actor and the hand number, and is
-never the name of an evaluation stream.
+never the name of an evaluation stream. An actor's hands are the ones its stream names say.
 Many processes: two actors both deliver samples, the actors' net ends equal to the learner's,
 the last checkpoint holds the learner's weights, and a used run directory is refused.
 The split: the training code never names the sealed deals; the script refuses seeds 0-2.
@@ -39,6 +41,7 @@ from stacker.dmc import (
     RMSPROP_ALPHA,
     RMSPROP_EPS,
     RMSPROP_MOMENTUM,
+    actor_loop,
     choose_action,
     collate_samples,
     hand_stream_name,
@@ -73,12 +76,19 @@ FIXED_BATCH_LOSS_FRACTION = 0.1
 # Clip test: returns are multiplied by this so the gradient is far longer than MAX_GRAD_NORM.
 LARGE_RETURN_SCALE = 1000.0
 CLIP_TOLERANCE = 1e-3
+# Stale-gradient test: the value written into every stored gradient before the update. Over the
+# net's 2.3 million weights that is a gradient about 1,500 long, far above a real one.
+STALE_GRADIENT_VALUE = 1.0
+STALE_GRADIENT_TOLERANCE = 1e-6
 # Determinism test: a small loop, about a second per run.
 LOOP_UPDATES = 3
 LOOP_SAMPLES_PER_UPDATE = 64
 # Stream-name tests: any actor id and hand number; each is changed by one to get a neighbour.
 STREAM_ACTOR = 3
 STREAM_HAND = 7
+# Actor-stream gate: actors compared, and the hands each plays before the stand-in queue stops it.
+STREAM_GATE_ACTORS = 2
+STREAM_GATE_HANDS = 2
 # Two-actor smoke: a hand is about 70 decisions, so 256 samples take several hands and three
 # such batches leave time for both actors to deliver. About 3 s, most of it process start.
 SMOKE_ACTORS = 2
@@ -129,6 +139,44 @@ def dealt_hand_samples():
     rng = random.Random(DEV_SEED)
     state = new_hand(NUM_PLAYERS, rng)
     return self_play_hand(state, seeded_net(), EPSILON, rng)
+
+
+class QueueFull(Exception):
+    """Raised by StoppingQueue to end an actor_loop call, which never returns by itself."""
+
+
+class StoppingQueue:
+    """
+    Stands in for the actors' sample queue in a test that runs actor_loop in this process.
+    Keeps every item put on it in self.items, and raises QueueFull on the put that brings the
+    count to max_items, after storing that item.
+    """
+
+    def __init__(self, max_items):
+        self.max_items = max_items
+        self.items = []
+
+    def put(self, item):
+        self.items.append(item)
+        if len(self.items) == self.max_items:
+            raise QueueFull
+
+
+def samples_equal(first, second):
+    """
+    True when two lists of samples from self_play_hand hold the same decisions in the same
+    order: equal state vectors, histories, history masks, taken actions and returns.
+    """
+    if len(first) != len(second):
+        return False
+    for first_sample, second_sample in zip(first, second):
+        # The first four parts are numpy arrays; the last is the return, a float.
+        for part_index in range(4):
+            if not np.array_equal(first_sample[part_index], second_sample[part_index]):
+                return False
+        if first_sample[4] != second_sample[4]:
+            return False
+    return True
 
 
 def control_optimizer(q_net):
@@ -293,6 +341,25 @@ def test_large_gradient_is_clipped_to_the_cap():
     assert gradient_norm(net) == pytest.approx(MAX_GRAD_NORM, abs=CLIP_TOLERANCE)
 
 
+def test_old_gradients_are_cleared_before_an_update():
+    samples, _ = dealt_hand_samples()
+
+    # The reference: one update on a net with no gradients stored yet.
+    clean_net = seeded_net()
+    _, clean_norm = learner_step(clean_net, control_optimizer(clean_net), samples)
+
+    # The same weights, but with a gradient already stored on every one of them, as an earlier
+    # update leaves behind. backward() adds to what is stored, so if learner_step did not
+    # clear it first, the gradient it measures would be this batch's plus the leftover.
+    stale_net = seeded_net()
+    for parameter in stale_net.parameters():
+        parameter.grad = torch.full_like(parameter, STALE_GRADIENT_VALUE)
+    _, stale_norm = learner_step(stale_net, control_optimizer(stale_net), samples)
+
+    # Same weights and same batch, so the same gradient: the leftover had no effect.
+    assert stale_norm == pytest.approx(clean_norm, rel=STALE_GRADIENT_TOLERANCE)
+
+
 def test_same_seed_gives_identical_results():
     first = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
     second = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
@@ -302,6 +369,30 @@ def test_same_seed_gives_identical_results():
     assert first == second
     # The seed is really used: another one gives other weights and other hands.
     assert first != other_seed
+
+
+def test_one_process_loop_trains_on_each_sample_once(monkeypatch):
+    # Stands in for learner_step inside train_one_process: keeps each batch it is handed and
+    # updates nothing. The loop's own code, which cuts the batches, is what is under test.
+    batches = []
+
+    def recording_learner_step(q_net, optimizer, samples):
+        batches.append(samples)
+        return 0.0, 0.0
+
+    monkeypatch.setattr("stacker.dmc.learner_step", recording_learner_step)
+    train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
+
+    assert len(batches) == LOOP_UPDATES
+    # id() is the identity of the sample object itself, so a sample handed over in two batches
+    # shows up as a repeated id. Every batch is still held in `batches`, so no id is reused
+    # for a new object.
+    sample_ids = set()
+    for batch in batches:
+        assert len(batch) == LOOP_SAMPLES_PER_UPDATE
+        for sample in batch:
+            assert id(sample) not in sample_ids
+            sample_ids.add(id(sample))
 
 
 def test_stream_name_uses_seed_actor_and_hand():
@@ -322,6 +413,46 @@ def test_training_streams_are_not_evaluation_streams():
     assert name != f"{DEV_SEED}:{STREAM_ACTOR}:{STREAM_HAND}"
     # The prefix is what keeps them apart for every seed: no evaluation stream starts with it.
     assert name.startswith("train:")
+
+
+def test_actor_plays_the_hands_its_stream_names():
+    # Epsilon 0 and fixed weights: a hand is then fully set by the rng it is dealt and played
+    # from, so equal samples mean equal streams.
+    q_net = seeded_net()
+
+    # actor_loop sets torch to one thread for its own process. Here it runs in the test
+    # process, so the setting is put back afterwards for the tests that follow.
+    threads_before = torch.get_num_threads()
+    hands_by_actor = []
+    try:
+        for actor_id in range(STREAM_GATE_ACTORS):
+            sample_queue = StoppingQueue(STREAM_GATE_HANDS)
+            with pytest.raises(QueueFull):
+                actor_loop(actor_id, DEV_SEED, q_net, sample_queue, 0.0)
+
+            hands = []
+            for queued_actor_id, samples in sample_queue.items:
+                # Each queued item is labelled with the actor that played it.
+                assert queued_actor_id == actor_id
+                hands.append(samples)
+            assert len(hands) == STREAM_GATE_HANDS
+            hands_by_actor.append(hands)
+    finally:
+        torch.set_num_threads(threads_before)
+
+    # The actor's n-th hand is the hand its stream name gives: seed, actor id and hand number
+    # all reach hand_stream_name, and the hand number goes up by one per hand.
+    for actor_id in range(STREAM_GATE_ACTORS):
+        for hand_index in range(STREAM_GATE_HANDS):
+            hand_rng = random.Random(hand_stream_name(DEV_SEED, actor_id, hand_index))
+            state = new_hand(NUM_PLAYERS, hand_rng)
+            expected_samples, _ = self_play_hand(state, q_net, 0.0, hand_rng)
+            assert samples_equal(hands_by_actor[actor_id][hand_index], expected_samples)
+
+    # And those hands really differ: two actors do not play the same deal, and one actor does
+    # not play the same deal twice. Without this, training would count one hand many times.
+    assert not samples_equal(hands_by_actor[0][0], hands_by_actor[1][0])
+    assert not samples_equal(hands_by_actor[0][0], hands_by_actor[0][1])
 
 
 def test_two_actors_feed_the_learner(tmp_path):

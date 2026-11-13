@@ -1,0 +1,81 @@
+{
+  "gates_file": "tests/test_dmc.py",
+  "commit": "5d2a897f04470ab1e800abb07d63d5e5eb8116b0",
+  "uncommitted_changes": true,
+  "rows": [
+    {
+      "mutation": "baseline (no bug)",
+      "failed_gates": []
+    },
+    {
+      "mutation": "return of the next seat",
+      "failed_gates": [
+        "test_scripted_hand_gives_each_decision_its_own_seats_score",
+        "test_samples_match_the_hand_that_was_played"
+      ]
+    },
+    {
+      "mutation": "stored action is row 0, not the one played",
+      "failed_gates": [
+        "test_samples_match_the_hand_that_was_played"
+      ]
+    },
+    {
+      "mutation": "forced turn calls the net",
+      "failed_gates": [
+        "test_forced_turn_skips_the_net",
+        "test_scripted_hand_gives_each_decision_its_own_seats_score"
+      ]
+    },
+    {
+      "mutation": "greedy pick takes the lowest Q",
+      "failed_gates": [
+        "test_epsilon_zero_picks_the_highest_q"
+      ]
+    },
+    {
+      "mutation": "returns shaped [B, 1]",
+      "failed_gates": [
+        "test_collate_samples_shapes",
+        "test_loss_falls_on_a_fixed_batch"
+      ]
+    },
+    {
+      "mutation": "no gradient clip",
+      "failed_gates": [
+        "test_large_gradient_is_clipped_to_the_cap"
+      ]
+    },
+    {
+      "mutation": "old gradients not cleared",
+      "failed_gates": [
+        "test_old_gradients_are_cleared_before_an_update"
+      ]
+    },
+    {
+      "mutation": "one-process loop reuses its samples",
+      "failed_gates": [
+        "test_one_process_loop_trains_on_each_sample_once"
+      ]
+    },
+    {
+      "mutation": "actor loop reuses its samples",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "weights never copied to the actors",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "every actor plays the same stream",
+      "failed_gates": [
+        "test_actor_plays_the_hands_its_stream_names"
+      ]
+    }
+  ],
+  "missed": []
+}
