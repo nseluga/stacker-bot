@@ -1,6 +1,6 @@
 """
-Gates for the M3 Deep Monte-Carlo loop, one process (stage plan specialist_explore, stage 3
-`DMC loop`, pieces 2-6).
+Gates for the M3 Deep Monte-Carlo loop (stage plan specialist_explore, stage 3 `DMC loop`,
+pieces 2-6 one process, pieces 8-10 many processes).
 
 The pick: a forced turn never calls the net; epsilon 0 takes the highest Q; epsilon 1 is uniform.
 The samples: every decision of a hand is stored, forced ones included; each stored action row is
@@ -9,10 +9,21 @@ The batch: one action row per sample (K = 1), returns with one axis.
 The update: the loss falls on a fixed batch; one step moves every parameter; a gradient longer
 than MAX_GRAD_NORM is cut to exactly that length.
 The loop: the same seed gives the same result; another seed does not.
+The streams: a training hand's rng name uses the seed, the actor and the hand number, and is
+never the name of an evaluation stream.
+Many processes: two actors both deliver samples, the actors' net ends equal to the learner's,
+the last checkpoint holds the learner's weights, and a used run directory is refused.
+The split: the training code never names the sealed deals; the script refuses seeds 0-2.
 Seeds start at 10: seeds 0-2 are kept for confirm runs.
 """
 
+import json
+import math
+import os
 import random
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -30,12 +41,15 @@ from stacker.dmc import (
     RMSPROP_MOMENTUM,
     choose_action,
     collate_samples,
+    hand_stream_name,
     learner_step,
     self_play_hand,
+    train,
     train_one_process,
 )
 from stacker.encode import ACTION_DIM, HISTORY_WINDOW, MOVE_DIM, STATE_DIM, encode_action
 from stacker.game import HandState, new_hand
+from stacker.net import QNet
 
 # Legal actions of the decision the pick tests use.
 PICK_NUM_ACTIONS = 5
@@ -62,6 +76,20 @@ CLIP_TOLERANCE = 1e-3
 # Determinism test: a small loop, about a second per run.
 LOOP_UPDATES = 3
 LOOP_SAMPLES_PER_UPDATE = 64
+# Stream-name tests: any actor id and hand number; each is changed by one to get a neighbour.
+STREAM_ACTOR = 3
+STREAM_HAND = 7
+# Two-actor smoke: a hand is about 70 decisions, so 256 samples take several hands and three
+# such batches leave time for both actors to deliver. About 3 s, most of it process start.
+SMOKE_ACTORS = 2
+SMOKE_UPDATES = 3
+SMOKE_SAMPLES_PER_UPDATE = 256
+# The files whose text must never name the sealed deals (rule 1), relative to the repo root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TRAINING_CODE_FILES = ("src/stacker/dmc.py", "scripts/train_dmc.py")
+# A test seed (rule 2: 0-2 are for confirm runs) and the run name the refused run would take.
+REFUSED_SEED = 2
+REFUSED_RUN_NAME = "gate_refused_test_seed"
 
 
 def raising_net(*net_inputs):
@@ -274,3 +302,99 @@ def test_same_seed_gives_identical_results():
     assert first == second
     # The seed is really used: another one gives other weights and other hands.
     assert first != other_seed
+
+
+def test_stream_name_uses_seed_actor_and_hand():
+    name = hand_stream_name(DEV_SEED, STREAM_ACTOR, STREAM_HAND)
+    # Each input alone changes the name: another run, another actor, another hand.
+    assert hand_stream_name(DEV_SEED + 1, STREAM_ACTOR, STREAM_HAND) != name
+    assert hand_stream_name(DEV_SEED, STREAM_ACTOR + 1, STREAM_HAND) != name
+    assert hand_stream_name(DEV_SEED, STREAM_ACTOR, STREAM_HAND + 1) != name
+    # And the name is a fixed function of them: the same hand is dealt on a rerun.
+    assert hand_stream_name(DEV_SEED, STREAM_ACTOR, STREAM_HAND) == name
+
+
+def test_training_streams_are_not_evaluation_streams():
+    name = hand_stream_name(DEV_SEED, STREAM_ACTOR, STREAM_HAND)
+    # The evaluation and throughput streams for the same numbers (characterize.py): one per
+    # hand, and one per worker and hand. Both start with the seed's digits.
+    assert name != f"{DEV_SEED}:{STREAM_HAND}"
+    assert name != f"{DEV_SEED}:{STREAM_ACTOR}:{STREAM_HAND}"
+    # The prefix is what keeps them apart for every seed: no evaluation stream starts with it.
+    assert name.startswith("train:")
+
+
+def test_two_actors_feed_the_learner(tmp_path):
+    q_net, actor_net = train(
+        DEV_SEED,
+        SMOKE_ACTORS,
+        tmp_path,
+        SMOKE_UPDATES,
+        samples_per_update=SMOKE_SAMPLES_PER_UPDATE,
+        checkpoint_every=SMOKE_UPDATES,
+    )
+
+    log_lines = []
+    with open(tmp_path / "log.jsonl") as log_file:
+        for line in log_file:
+            log_lines.append(json.loads(line))
+    assert len(log_lines) == SMOKE_UPDATES
+    for log_line in log_lines:
+        assert math.isfinite(log_line["loss"])
+        assert math.isfinite(log_line["gradient_norm"])
+
+    # samples_by_actor is a running total, so the last line counts the whole run: both actors
+    # delivered, and together at least what the updates used.
+    samples_by_actor = log_lines[-1]["samples_by_actor"]
+    assert len(samples_by_actor) == SMOKE_ACTORS
+    for count in samples_by_actor:
+        assert count > 0
+    assert sum(samples_by_actor) >= SMOKE_UPDATES * SMOKE_SAMPLES_PER_UPDATE
+
+    # Equation 12: after the last update the actors' net holds the learner's weights.
+    learner_weights = q_net.state_dict()
+    actor_weights = actor_net.state_dict()
+    for name in learner_weights:
+        assert torch.equal(actor_weights[name], learner_weights[name]), name
+
+    # The last checkpoint loads into a fresh net and holds those same weights.
+    restored = QNet()
+    restored.load_state_dict(torch.load(tmp_path / f"checkpoint_{SMOKE_UPDATES:06d}.pt"))
+    restored_weights = restored.state_dict()
+    for name in learner_weights:
+        assert torch.equal(restored_weights[name], learner_weights[name]), name
+
+
+def test_used_run_directory_is_refused(tmp_path):
+    # A log.jsonl marks an earlier run. train must stop before starting any actor, so this
+    # test is instant: nothing is spawned.
+    log_path = tmp_path / "log.jsonl"
+    log_path.write_text("earlier run\n")
+    with pytest.raises(FileExistsError):
+        train(DEV_SEED, SMOKE_ACTORS, tmp_path, SMOKE_UPDATES)
+    # The earlier log is untouched.
+    assert log_path.read_text() == "earlier run\n"
+
+
+def test_training_code_never_names_the_sealed_deals():
+    # A text check, not a run: it fails when someone wires data/sealed-deals/ into training.
+    for relative_path in TRAINING_CODE_FILES:
+        source = (REPO_ROOT / relative_path).read_text()
+        assert "sealed-deals" not in source, relative_path
+        assert "sealed_deals" not in source, relative_path
+
+
+def test_train_script_refuses_a_test_seed():
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    command = [
+        sys.executable, str(REPO_ROOT / "scripts" / "train_dmc.py"),
+        "--seed", str(REFUSED_SEED), "--actors", "1", "--updates", "1",
+        "--run-name", REFUSED_RUN_NAME,
+    ]
+    finished = subprocess.run(
+        command, cwd=REPO_ROOT, env=environment, capture_output=True, text=True
+    )
+    assert finished.returncode != 0
+    # The refusal comes before anything is created: no run directory is left behind.
+    assert not (REPO_ROOT / "runs" / "specialist_explore" / REFUSED_RUN_NAME).exists()

@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import platform
+import random
 import socket
 import time
 from pathlib import Path
@@ -26,8 +27,19 @@ import torch
 from evaluate_agents import AGENTS, DEV_SEED_MIN, RESULTS_ROOT, git_state
 
 from stacker.characterize import decisions_per_second
-from stacker.dmc import EPSILON, choose_action
+from stacker.dmc import (
+    EPSILON,
+    LEARNING_RATE,
+    RMSPROP_ALPHA,
+    RMSPROP_EPS,
+    RMSPROP_MOMENTUM,
+    SAMPLES_PER_UPDATE,
+    choose_action,
+    learner_step,
+    self_play_hand,
+)
 from stacker.encode import encode_decision
+from stacker.game import new_hand
 from stacker.net import QNet
 from stacker.sealed import config_name
 
@@ -60,6 +72,51 @@ def net_agent(observation, actions, rng):
     return actions[index]
 
 
+def learner_samples_per_second(num_players, seed, seconds):
+    """
+    How many samples per second the learner can train on, on this machine: the other side of
+    the loop from the actors' decisions per second.
+    num_players: 3 to 8. seed: a dev seed (≥ 10, rule 2). seconds: how long to keep updating.
+    Returns (samples per second, updates made, elapsed seconds).
+
+    Mechanism: self-play hands until one batch of SAMPLES_PER_UPDATE samples is ready, outside
+    the timing. Then call learner_step on that same batch, back to back, until seconds have
+    passed. Each call pays what a training update pays: stacking the samples into tensors, the
+    forward and backward pass, clipping and the optimizer step. The weights change from call to
+    call, but the time an update takes does not depend on their values.
+    """
+    torch.manual_seed(NET_SEED)
+    q_net = QNet()
+    optimizer = torch.optim.RMSprop(
+        q_net.parameters(),
+        lr=LEARNING_RATE,
+        alpha=RMSPROP_ALPHA,
+        eps=RMSPROP_EPS,
+        momentum=RMSPROP_MOMENTUM,
+    )
+
+    # The batch: real self-play samples, forced turns included, as in training.
+    samples = []
+    hands = 0
+    while len(samples) < SAMPLES_PER_UPDATE:
+        rng = random.Random(f"{seed}:learner:{hands}")
+        hand_samples, _ = self_play_hand(new_hand(num_players, rng), q_net, EPSILON, rng)
+        samples.extend(hand_samples)
+        hands += 1
+    batch = samples[:SAMPLES_PER_UPDATE]
+
+    updates = 0
+    start = time.perf_counter()
+    # The check sits at the bottom, so seconds = 0 still makes exactly one update.
+    while True:
+        learner_step(q_net, optimizer, batch)
+        updates += 1
+        if time.perf_counter() - start >= seconds:
+            break
+    elapsed = time.perf_counter() - start
+    return updates * SAMPLES_PER_UPDATE / elapsed, updates, elapsed
+
+
 # Greedy costs almost nothing per decision, so its timing is the engine's (stage plan
 # characterization, piece 5). Net adds what an actor pays per decision at M3.
 THROUGHPUT_AGENTS = {"greedy": AGENTS["greedy"], "net": net_agent}
@@ -68,13 +125,17 @@ DEFAULT_OUT_DIR = RESULTS_ROOT / "characterization"
 
 
 def main():
-    """Parses the command line, runs one measurement per process count, writes the sweep JSON."""
+    """
+    Parses the command line, measures every process count --repeats times, then (net agent only)
+    the learner --repeats times, and writes the sweep JSON.
+    """
     parser = argparse.ArgumentParser(description="Agent decisions per second on this machine.")
     parser.add_argument("--players", type=int, required=True, help="3 to 8")
     parser.add_argument("--agent", choices=sorted(THROUGHPUT_AGENTS), required=True)
     parser.add_argument("--seconds", type=float, required=True, help="per worker, per row")
     parser.add_argument("--processes", required=True, help="process counts, e.g. 1,4,8")
     parser.add_argument("--seed", type=int, required=True, help=f"dev seed, ≥ {DEV_SEED_MIN}")
+    parser.add_argument("--repeats", type=int, default=1, help="times each row is measured")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     args = parser.parse_args()
 
@@ -98,35 +159,65 @@ def main():
         f"_dev_s{seconds_label}_seed{args.seed}"
     )
 
+    # Repeats are the outer loop: every process count is measured once, then all of them again.
+    # A slow stretch on the machine (other users, heat) then lands on one repeat of every row,
+    # not on all repeats of one row.
     rows = []
-    for processes in process_counts:
-        # Load before the row: other users' work on a shared box slows every worker.
-        load_one_minute = os.getloadavg()[0]
-        start = time.perf_counter()
-        decision_rate, hand_rate, per_worker = decisions_per_second(
-            args.players, THROUGHPUT_AGENTS[args.agent], args.seconds, processes, args.seed
-        )
-        # Wall time includes pool start; it checks that workers' timed windows overlapped.
-        wall_seconds = time.perf_counter() - start
-        workers = []
-        for decisions, hands, elapsed in per_worker:
-            workers.append({"decisions": decisions, "hands": hands, "seconds": round(elapsed, 3)})
-        rows.append(
-            {
-                "processes": processes,
-                "load_one_minute_before": round(load_one_minute, 2),
-                "wall_seconds": round(wall_seconds, 3),
-                "decisions_per_second": round(decision_rate, 1),
-                "hands_per_second": round(hand_rate, 2),
-                "decisions_per_second_per_process": round(decision_rate / processes, 1),
-                "workers": workers,
-            }
-        )
-        # Per process shows how the rate scales: flat means each added process adds a full share.
-        print(
-            f"{run_name} p{processes}: {decision_rate:,.0f} decisions/s, {hand_rate:,.1f} hands/s, "
-            f"{decision_rate / processes:,.0f} per process"
-        )
+    for repeat in range(1, args.repeats + 1):
+        for processes in process_counts:
+            # Load before the row: other users' work on a shared box slows every worker.
+            load_one_minute = os.getloadavg()[0]
+            start = time.perf_counter()
+            decision_rate, hand_rate, per_worker = decisions_per_second(
+                args.players, THROUGHPUT_AGENTS[args.agent], args.seconds, processes, args.seed
+            )
+            # Wall time includes pool start; it checks that workers' timed windows overlapped.
+            wall_seconds = time.perf_counter() - start
+            workers = []
+            for decisions, hands, elapsed in per_worker:
+                workers.append({"decisions": decisions, "hands": hands, "seconds": round(elapsed, 3)})
+            rows.append(
+                {
+                    "processes": processes,
+                    "repeat": repeat,
+                    "load_one_minute_before": round(load_one_minute, 2),
+                    "wall_seconds": round(wall_seconds, 3),
+                    "decisions_per_second": round(decision_rate, 1),
+                    "hands_per_second": round(hand_rate, 2),
+                    "decisions_per_second_per_process": round(decision_rate / processes, 1),
+                    "workers": workers,
+                }
+            )
+            # Per process shows how the rate scales: flat means each added process adds a full share.
+            print(
+                f"{run_name} p{processes} r{repeat}: {decision_rate:,.0f} decisions/s, {hand_rate:,.1f} hands/s, "
+                f"{decision_rate / processes:,.0f} per process"
+            )
+
+    # The learner side of the loop, only for the net: greedy has nothing to train. Timed after
+    # the actor rows, alone, so the two never share cores here (in training they do).
+    learner = []
+    if args.agent == "net":
+        for repeat in range(1, args.repeats + 1):
+            load_one_minute = os.getloadavg()[0]
+            sample_rate, updates, elapsed = learner_samples_per_second(
+                args.players, args.seed, args.seconds
+            )
+            learner.append(
+                {
+                    "repeat": repeat,
+                    "load_one_minute_before": round(load_one_minute, 2),
+                    # The learner keeps torch's default thread count; the rate depends on it.
+                    "torch_threads": torch.get_num_threads(),
+                    "samples_per_second": round(sample_rate, 1),
+                    "updates": updates,
+                    "seconds": round(elapsed, 3),
+                }
+            )
+            print(
+                f"{run_name} learner r{repeat}: {sample_rate:,.0f} samples/s, "
+                f"{updates} updates, {torch.get_num_threads()} torch threads"
+            )
 
     commit, uncommitted_changes = git_state()
 
@@ -143,12 +234,14 @@ def main():
         "agent": args.agent,
         "seconds": args.seconds,
         "seed": args.seed,
+        "repeats": args.repeats,
         "source": "dev",
         "machine": machine,
         "cpu_count": os.cpu_count(),
         "usable_cpus": usable_cpus,
         "python": platform.python_version(),
         "rows": rows,
+        "learner": learner,
         "git_commit": commit,
         "uncommitted_changes": uncommitted_changes,
     }

@@ -276,6 +276,38 @@ def test_throughput_script_writes_one_row_per_process_count(tmp_path):
     assert record["rows"][0]["wall_seconds"] >= 0.3
     assert record["rows"][0]["load_one_minute_before"] >= 0
     assert "usable_cpus" in record
+    # Without --repeats every row is measured once; greedy has no learner to time.
+    for row in record["rows"]:
+        assert row["repeat"] == 1
+    assert record["learner"] == []
+
+
+def test_throughput_script_times_the_net_and_the_learner_per_repeat(tmp_path):
+    # About 6 s: the learner timing first self-plays one full batch of samples.
+    finished = run_throughput(
+        ["--players", "4", "--agent", "net", "--seconds", "0.3", "--processes", "1",
+         "--seed", "13", "--repeats", "2", "--out-dir", str(tmp_path)]
+    )
+    assert finished.returncode == 0, finished.stderr
+    written = list(tmp_path.iterdir())
+    assert len(written) == 1
+    with open(written[0]) as file:
+        record = json.load(file)
+
+    # One row per repeat of the one process count, numbered from 1.
+    repeats = []
+    for row in record["rows"]:
+        assert row["decisions_per_second"] > 0
+        repeats.append(row["repeat"])
+    assert repeats == [1, 2]
+
+    learner_repeats = []
+    for entry in record["learner"]:
+        assert entry["samples_per_second"] > 0
+        assert entry["updates"] >= 1
+        assert entry["torch_threads"] >= 1
+        learner_repeats.append(entry["repeat"])
+    assert learner_repeats == [1, 2]
 
 
 def test_throughput_script_refuses_a_test_seed(tmp_path):

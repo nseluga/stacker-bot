@@ -25,3 +25,6 @@ scratch/*
 data/dev-deals/
 
 .DS_Store
+
+# Local copies of the tracker artifact docs (ArtifactData reads and writes), never committed
+.tracker/

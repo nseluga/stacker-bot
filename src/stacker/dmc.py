@@ -206,6 +206,20 @@ def learner_step(q_net, optimizer, samples):
     return float(loss.detach()), float(gradient_norm)
 
 
+def hand_stream_name(seed, actor_id, hand_index):
+    """
+    The name of the random stream one training hand is dealt and played from.
+    seed: the run's seed. actor_id: which actor plays the hand (0 in the one-process loop).
+    hand_index: that actor's hand count, from 0.
+    Returns a string; random.Random(that string) is the hand's rng.
+
+    All three numbers are in the name, so no two runs, no two actors of a run, and no two hands
+    of an actor share a deal. The "train:" prefix keeps the name different from every evaluation
+    stream, which are f"{seed}:{hand}" and f"{seed}:{worker}:{hand}" (characterize.py).
+    """
+    return f"train:{seed}:{actor_id}:{hand_index}"
+
+
 def train_one_process(seed, num_updates, samples_per_update):
     """
     Runs the whole training loop in this process: play hands, fill a batch, update, repeat
@@ -235,10 +249,9 @@ def train_one_process(seed, num_updates, samples_per_update):
     results = []
     for _ in range(num_updates):
         while len(waiting_samples) < samples_per_update:
-            # One rng per hand, named by the seed and the hand's number. The 0 is the actor id:
-            # this process plays the part of actor 0 of the many-actor loop. The "train:" prefix
-            # keeps the string different from every evaluation stream.
-            hand_rng = random.Random(f"train:{seed}:0:{hands_played}")
+            # One rng per hand. The 0 is the actor id: this process plays the part of actor 0
+            # of the many-actor loop.
+            hand_rng = random.Random(hand_stream_name(seed, 0, hands_played))
             state = new_hand(NUM_PLAYERS, hand_rng)
             # The net that acts is the net being trained, so the actor always plays with the
             # newest weights (equation 12 with nothing to copy).
@@ -269,10 +282,8 @@ def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon):
 
     hands_played = 0
     while True:
-        # One rng per hand, named by seed, actor and hand number: no two actors of a run, and
-        # no two runs, play the same deal. The "train:" prefix keeps the string different from
-        # every evaluation stream.
-        hand_rng = random.Random(f"train:{seed}:{actor_id}:{hands_played}")
+        # One rng per hand: no two actors of a run, and no two runs, play the same deal.
+        hand_rng = random.Random(hand_stream_name(seed, actor_id, hands_played))
         state = new_hand(NUM_PLAYERS, hand_rng)
         # The learner may be writing new weights while this hand is played, with no lock, as
         # in DouZero: a decision can be scored by a mix of the old and new weights, which
