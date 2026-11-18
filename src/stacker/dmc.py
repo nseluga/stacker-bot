@@ -174,6 +174,36 @@ def collate_samples(samples):
     return net_inputs, taken_index, returns
 
 
+def shuffle_returns(samples, rng):
+    """
+    The label-shuffle control (spec part 13, equation 14): hands the batch's returns out again
+    in a random order, so no sample's return has anything to do with its decision.
+    samples: list of B samples from self_play_hand. Not changed.
+    rng: a random.Random; decides the order.
+    Returns a new list of B samples in the same order. Each keeps its state, history, mask and
+      taken action and gets the return of a random sample of the batch. The B returns are the
+      same numbers as before, each used once.
+
+    A net trained on these batches has nothing to learn from: its loss must stay at the
+    variance of the batch's returns. If it goes lower, something other than the decision is
+    telling the net its return.
+    """
+    shuffled = []
+    for _, _, _, _, hand_return in samples:
+        shuffled.append(hand_return)
+    # In place; every order of the B returns is equally likely.
+    rng.shuffle(shuffled)
+
+    # A sample is a tuple and cannot be changed, so each one is built again with its new return.
+    shuffled_samples = []
+    for index in range(len(samples)):
+        state_vector, history, history_mask, taken_action, _ = samples[index]
+        shuffled_samples.append(
+            (state_vector, history, history_mask, taken_action, shuffled[index])
+        )
+    return shuffled_samples
+
+
 def learner_step(q_net, optimizer, samples):
     """
     Updates q_net once from one batch of samples (spec part 9, equations 10-11).
@@ -183,8 +213,20 @@ def learner_step(q_net, optimizer, samples):
     samples: list of B samples from self_play_hand.
     Returns (loss, gradient_norm), both floats: the mean squared error on this batch before the
       update, and the length of the gradient before clipping.
+    The update runs on the device q_net's weights are on (spec part 12, equation 13).
     """
     net_inputs, taken_index, returns = collate_samples(samples)
+
+    # The batch is built on the CPU. PyTorch cannot combine tensors on different devices, so
+    # every tensor of the batch is moved to where the weights are. When that is the CPU, .to()
+    # hands back the same tensor and nothing is copied.
+    device = next(q_net.parameters()).device
+    inputs_on_device = []
+    for tensor in net_inputs:
+        inputs_on_device.append(tensor.to(device))
+    net_inputs = inputs_on_device
+    taken_index = taken_index.to(device)
+    returns = returns.to(device)
 
     # backward() adds to the gradients already stored on the weights, so the ones from the last
     # update are cleared first. Clearing here, not after the step, leaves this update's
@@ -306,27 +348,46 @@ def train(
     num_updates,
     samples_per_update=SAMPLES_PER_UPDATE,
     checkpoint_every=CHECKPOINT_EVERY_UPDATES,
+    device="cpu",
+    shuffle_control=False,
 ):
     """
-    Runs the training loop with actors in their own processes (spec parts 7-9).
+    Runs the training loop with actors in their own processes (spec parts 7-9 and 12).
     seed: int; fixes the starting weights and every actor's hands. The run is still not
       repeatable bit for bit: which actor's hand reaches the queue first depends on timing.
     num_actors: how many actor processes to start.
     run_dir: path of the run's directory, created if missing. It gets log.jsonl, one line per
-      update, and checkpoint_<updates done>.pt files, each a QNet state_dict. A directory that
-      already has a log.jsonl is an earlier run and is refused (FileExistsError).
+      update, and checkpoint_<updates done>.pt files, each a QNet state_dict held on the CPU,
+      so it loads on a machine with no GPU. checkpoint_000000.pt is the untrained net. A
+      directory that already has a log.jsonl is an earlier run and is refused (FileExistsError).
     num_updates: how many learner_step calls to make.
     samples_per_update: batch size B of each update.
     checkpoint_every: a checkpoint is saved after every this many updates, and after the last.
-    Returns (q_net, actor_net): the trained learner net and the shared net the actors played
-      with, which holds the same weights.
+    device: where the learner's net lives and the updates run, e.g. "cpu" or "cuda". The actors
+      always play on the CPU.
+    shuffle_control: True runs the label-shuffle control: every batch goes through
+      shuffle_returns before its update. False (a normal run) leaves the batches alone.
+    Returns (q_net, actor_net): the trained learner net, on device, and the shared net the
+      actors played with, on the CPU, which holds the same weights.
     Must be called under `if __name__ == "__main__":` in a script: each actor process starts by
       importing the script again.
     """
     # QNet() draws its starting weights from torch's global random stream, so seeding that
-    # stream first fixes them.
+    # stream first fixes them. The net is built on the CPU whatever the device: a GPU has its
+    # own random stream, and weights drawn there would differ from the CPU's for the same seed.
     torch.manual_seed(seed)
     q_net = QNet()
+
+    # The actors' net: the same weights as the learner's, moved to memory that every process
+    # can read. Actors get a handle to that memory, not a copy of the weights.
+    actor_net = QNet()
+    actor_net.load_state_dict(q_net.state_dict())
+    actor_net.share_memory()
+
+    # Equation 13: the learner's weights move to the device, the actors' copy stays on the CPU.
+    # The optimizer is built after the move, so the running averages it keeps per weight are
+    # created on the device too.
+    q_net.to(device)
     optimizer = torch.optim.RMSprop(
         q_net.parameters(),
         lr=LEARNING_RATE,
@@ -335,12 +396,6 @@ def train(
         momentum=RMSPROP_MOMENTUM,
     )
 
-    # The actors' net: the same weights as the learner's, moved to memory that every process
-    # can read. Actors get a handle to that memory, not a copy of the weights.
-    actor_net = QNet()
-    actor_net.load_state_dict(q_net.state_dict())
-    actor_net.share_memory()
-
     # The directory may exist already: the training script makes it first, to write the run's
     # config. A log in it means an earlier run, which is kept, so stop before any actor starts.
     run_dir = Path(run_dir)
@@ -348,6 +403,11 @@ def train(
     log_path = run_dir / "log.jsonl"
     if log_path.exists():
         raise FileExistsError(f"{log_path} exists: an earlier run is in this directory")
+
+    # The untrained net, saved before any update: the starting point every later checkpoint is
+    # compared with. Checkpoints are saved from the actors' copy because it is on the CPU: a
+    # file saved from GPU weights asks for a GPU when it is loaded.
+    torch.save(actor_net.state_dict(), run_dir / f"checkpoint_{0:06d}.pt")
 
     # "spawn" starts each actor as a fresh Python process. The other way, "fork", copies this
     # process while torch's threads may hold locks, and the copy can then wait on them forever.
@@ -364,6 +424,12 @@ def train(
         )
         actor.start()
         actors.append(actor)
+
+    # Its own stream, so the order it draws shares nothing with a hand stream ("train:...") or
+    # an evaluation stream. One rng for the whole run: each batch gets the next order from it.
+    shuffle_rng = None
+    if shuffle_control:
+        shuffle_rng = random.Random(f"shuffle:{seed}")
 
     # Samples received but not yet trained on; what is left after a batch starts the next one.
     waiting_samples = []
@@ -383,6 +449,8 @@ def train(
                     samples_by_actor[actor_id] += len(samples)
                 batch = waiting_samples[:samples_per_update]
                 waiting_samples = waiting_samples[samples_per_update:]
+                if shuffle_control:
+                    batch = shuffle_returns(batch, shuffle_rng)
 
                 learner_start = time.perf_counter()
                 loss, gradient_norm = learner_step(q_net, optimizer, batch)
@@ -392,13 +460,26 @@ def train(
                 actor_net.load_state_dict(q_net.state_dict())
                 update_end = time.perf_counter()
 
+                # The loss of a net that has learned nothing: it can do no better than answer
+                # the batch's mean return for every sample, and the mean squared error of that
+                # answer is the variance of the batch's returns (spec part 13). Dividing by B,
+                # not B - 1 (correction=0), is what makes the two equal. Worked out after the
+                # timers stop, so it is in neither wait_seconds nor learner_seconds.
+                batch_returns = []
+                for _, _, _, _, hand_return in batch:
+                    batch_returns.append(hand_return)
+                return_variance = float(torch.tensor(batch_returns).var(correction=0))
+
                 # wait_seconds is time spent short of samples (the actors are the limit);
                 # learner_seconds is the update and the copy (the learner is the limit).
                 # Whichever is larger names the bottleneck.
                 updates_done = update_index + 1
                 log_line = {
                     "update": updates_done,
+                    # Samples trained on so far: the x-axis of the learning curve.
+                    "samples_total": updates_done * samples_per_update,
                     "loss": loss,
+                    "return_variance": return_variance,
                     "gradient_norm": gradient_norm,
                     "wait_seconds": learner_start - update_start,
                     "learner_seconds": update_end - learner_start,
@@ -410,7 +491,10 @@ def train(
                 log_file.flush()
 
                 if updates_done % checkpoint_every == 0 or updates_done == num_updates:
-                    torch.save(q_net.state_dict(), run_dir / f"checkpoint_{updates_done:06d}.pt")
+                    # actor_net was given this update's weights a few lines up.
+                    torch.save(
+                        actor_net.state_dict(), run_dir / f"checkpoint_{updates_done:06d}.pt"
+                    )
     finally:
         # Reached on success, on an error and on Ctrl-C: no actor outlives the run. An actor
         # never returns by itself, so it is ended from here.
