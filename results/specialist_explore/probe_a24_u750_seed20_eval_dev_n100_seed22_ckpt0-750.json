@@ -1,0 +1,23 @@
+{
+  "run": "probe_a24_u750_seed20",
+  "fields": [
+    "random",
+    "greedy"
+  ],
+  "deals": 100,
+  "seed": 22,
+  "source": "dev",
+  "test_seats": [
+    0
+  ],
+  "checkpoints": [
+    0,
+    750
+  ],
+  "workers": 4,
+  "total_seconds": 7.66,
+  "git_commit": "7a4a9d56ef7b0fae88bc0dd1184b288431f51ba5",
+  "uncommitted_changes": false,
+  "run_git_commit": "7a4a9d56ef7b0fae88bc0dd1184b288431f51ba5",
+  "run_uncommitted_changes": false
+}
