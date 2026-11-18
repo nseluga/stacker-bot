@@ -1,0 +1,183 @@
+"""
+Gates for scripts/evaluate_checkpoints.py (stage plan specialist_explore, stage 4 piece 9;
+spec part 14, equation 15).
+
+Eval hygiene: a loaded checkpoint is in eval mode, on the CPU, with the saved weights; the agent
+plays the net's highest-scoring action on every turn that has a choice and never calls the net
+on a forced turn; scoring the same checkpoint twice gives the same numbers, and the bootstrap's
+rng is named by the seed.
+The split: scoring a checkpoint never loads the sealed deals; a test seed is refused by the
+function and by the script, before anything is written.
+Seeds start at 10: seeds 0-2 are kept for confirm runs.
+"""
+
+import os
+import random
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+from test_net import DEV_SEED, seeded_net
+
+from stacker.encode import encode_decision
+from stacker.evaluate import bootstrap_ci, paired_differences
+from stacker.net import collate_decisions
+
+# scripts/ is not a package, and evaluate_checkpoints.py imports its neighbours by name
+# (evaluate_agents, train_dmc), so the folder goes on the import path.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import evaluate_agents  # noqa: E402
+import evaluate_checkpoints  # noqa: E402
+from evaluate_agents import AGENTS, select_deals  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+NUM_PLAYERS = 4
+# Few deals: each is played in all 4 rotations, enough for hundreds of turns.
+GATE_DEALS = 5
+FIELD_NAME = "random"
+# A test seed (rule 2: 0-2 are for confirm runs) and the run name the refused run is given.
+REFUSED_SEED = 2
+REFUSED_RUN_NAME = "gate_refused_test_seed"
+
+
+def save_seeded_checkpoint(tmp_path):
+    """Saves seeded_net()'s weights as a checkpoint file under tmp_path. Returns its path."""
+    path = tmp_path / "checkpoint_000000.pt"
+    torch.save(seeded_net().state_dict(), path)
+    return path
+
+
+def test_loaded_checkpoint_is_ready_to_play(tmp_path):
+    net = evaluate_checkpoints.load_checkpoint_net(save_seeded_checkpoint(tmp_path))
+
+    # Eval mode: nothing in the net behaves as it does in training.
+    assert net.training is False
+
+    saved_weights = seeded_net().state_dict()
+    loaded_weights = net.state_dict()
+    assert set(loaded_weights) == set(saved_weights)
+    for name in saved_weights:
+        assert torch.equal(loaded_weights[name], saved_weights[name]), name
+        assert loaded_weights[name].device.type == "cpu", name
+
+
+def test_agent_plays_the_highest_scoring_action(tmp_path):
+    net = evaluate_checkpoints.load_checkpoint_net(save_seeded_checkpoint(tmp_path))
+    # Same weights in a second net, so working out the expected action adds no call to `net`.
+    reference_net = seeded_net()
+
+    net_calls = []
+
+    def count_call(module, inputs, output):
+        net_calls.append(1)
+
+    # A forward hook runs once after every forward pass of the net.
+    net.register_forward_hook(count_call)
+
+    forced_turns = []
+    choice_turns = []
+
+    def watched_agent(observation, actions, rng):
+        calls_before = len(net_calls)
+        action = evaluate_checkpoints.checkpoint_agent(net, observation, actions, rng)
+
+        if len(actions) == 1:
+            # Forced turn: the only action, and the net was not called.
+            forced_turns.append(1)
+            assert action == actions[0]
+            assert len(net_calls) == calls_before
+            return action
+
+        # A turn with a choice: one net call, and the action is the one the net scores highest.
+        # This holds on every such turn, so the agent made no random move (epsilon is 0).
+        choice_turns.append(1)
+        assert len(net_calls) == calls_before + 1
+        batch = collate_decisions([encode_decision(observation, actions)])
+        with torch.no_grad():
+            q_values = reference_net(*batch)  # [1, K]
+        assert action == actions[int(q_values[0].argmax())]
+        return action
+
+    deck_orders = select_deals(NUM_PLAYERS, GATE_DEALS, DEV_SEED, False)
+    paired_differences(
+        deck_orders,
+        NUM_PLAYERS,
+        watched_agent,
+        AGENTS[FIELD_NAME],
+        evaluate_checkpoints.TEST_SEATS,
+        DEV_SEED,
+    )
+
+    # Both kinds of turn came up, so neither branch above passed by never running.
+    assert len(forced_turns) > 0
+    assert len(choice_turns) > 0
+
+
+def test_same_checkpoint_scores_the_same_twice(tmp_path, monkeypatch):
+    # Record the first number of the rng the bootstrap is handed, then run the real bootstrap.
+    # With this few deals the interval itself can come out equal from two different rngs.
+    bootstrap_draws = []
+
+    def recording_bootstrap(differences, rng):
+        bootstrap_draws.append(rng.random())
+        return bootstrap_ci(differences, rng)
+
+    monkeypatch.setattr(evaluate_checkpoints, "bootstrap_ci", recording_bootstrap)
+
+    task = (str(save_seeded_checkpoint(tmp_path)), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, DEV_SEED)
+    first = evaluate_checkpoints.evaluate_checkpoint(task)
+    second = evaluate_checkpoints.evaluate_checkpoint(task)
+
+    # seconds is play time on the clock; everything else comes from the weights and the seed.
+    del first["seconds"]
+    del second["seconds"]
+    assert first == second
+    assert len(first["differences"]) == GATE_DEALS
+
+    # The bootstrap's rng is named by the seed alone, as in evaluate_agents.py.
+    expected_draw = random.Random(f"{DEV_SEED}:bootstrap").random()
+    assert bootstrap_draws == [expected_draw, expected_draw]
+
+
+def test_scoring_never_loads_the_sealed_deals(tmp_path, monkeypatch):
+    def refuse_sealed(num_players):
+        raise AssertionError("evaluate_checkpoint asked for the sealed deals")
+
+    # select_deals is the only caller of load_sealed, and looks the name up in its own module,
+    # so this stand-in runs if any path reaches the sealed set.
+    monkeypatch.setattr(evaluate_agents, "load_sealed", refuse_sealed)
+
+    task = (str(save_seeded_checkpoint(tmp_path)), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, DEV_SEED)
+    result = evaluate_checkpoints.evaluate_checkpoint(task)
+    assert len(result["differences"]) == GATE_DEALS
+
+
+def test_function_refuses_a_test_seed(tmp_path):
+    # The real load_sealed is in place here: a wrong path to the sealed deals would return them
+    # and not raise.
+    task = (
+        str(save_seeded_checkpoint(tmp_path)), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, REFUSED_SEED
+    )
+    with pytest.raises(ValueError, match="dev runs use seeds"):
+        evaluate_checkpoints.evaluate_checkpoint(task)
+
+
+def test_script_refuses_a_test_seed():
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    command = [
+        sys.executable, str(REPO_ROOT / "scripts" / "evaluate_checkpoints.py"),
+        "--run", REFUSED_RUN_NAME, "--seed", str(REFUSED_SEED),
+    ]
+    finished = subprocess.run(
+        command, cwd=REPO_ROOT, env=environment, capture_output=True, text=True
+    )
+    assert finished.returncode != 0
+    # The seed is what stopped it. The run does not exist either, and that would also exit
+    # with an error, so the exit code alone proves nothing.
+    assert "dev seeds are" in finished.stderr
+    # The refusal comes before anything is written.
+    assert list(evaluate_checkpoints.RESULTS_DIR.glob(REFUSED_RUN_NAME + "*")) == []

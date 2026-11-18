@@ -16,6 +16,10 @@ never the name of an evaluation stream. An actor's hands are the ones its stream
 Many processes: two actors both deliver samples, the actors' net ends equal to the learner's,
 the last checkpoint holds the learner's weights, and a used run directory is refused.
 The split: the training code never names the sealed deals; the script refuses seeds 0-2.
+The device: on a machine with no CUDA GPU the script refuses --device cuda before it makes a run.
+On a machine with one (teapot): an update on the GPU gives the CPU's loss; after a GPU run the
+learner is on the GPU, the actors' net is on the CPU in shared memory with the same weights, and
+every checkpoint is held on the CPU.
 Seeds start at 10: seeds 0-2 are kept for confirm runs.
 """
 
@@ -23,6 +27,8 @@ import json
 import math
 import os
 import random
+import shutil
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -47,6 +53,7 @@ from stacker.dmc import (
     hand_stream_name,
     learner_step,
     self_play_hand,
+    shuffle_returns,
     train,
     train_one_process,
 )
@@ -94,12 +101,27 @@ STREAM_GATE_HANDS = 2
 SMOKE_ACTORS = 2
 SMOKE_UPDATES = 3
 SMOKE_SAMPLES_PER_UPDATE = 256
+# train works the variance out in 32-bit floats; the test in Python's 64-bit ones.
+VARIANCE_TOLERANCE = 1e-6
+# The rng stream name train gives the label-shuffle control for this seed (spec part 13).
+SHUFFLE_STREAM = f"shuffle:{DEV_SEED}"
+# The largest variance a batch of returns can have: values lie in [0, 2], and the spread is
+# widest with half at each end, (1 - 0)² = 1.
+MAX_RETURN_VARIANCE = 1.0
 # The files whose text must never name the sealed deals (rule 1), relative to the repo root.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRAINING_CODE_FILES = ("src/stacker/dmc.py", "scripts/train_dmc.py")
 # A test seed (rule 2: 0-2 are for confirm runs) and the run name the refused run would take.
 REFUSED_SEED = 2
 REFUSED_RUN_NAME = "gate_refused_test_seed"
+# The largest gap allowed between one update's loss on the GPU and on the CPU. The two do the
+# same 32-bit sums in a different order, so the last digits differ; a wrong batch or a wrong
+# net gives a gap thousands of times larger.
+DEVICE_LOSS_TOLERANCE = 1e-5
+# Marks a gate that needs a GPU. Checked when pytest collects the file.
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA GPU here")
+# The run name a run refused for its device would take.
+NO_GPU_RUN_NAME = "gate_refused_no_gpu"
 
 
 def raising_net(*net_inputs):
@@ -177,6 +199,58 @@ def samples_equal(first, second):
         if first_sample[4] != second_sample[4]:
             return False
     return True
+
+
+def returns_of(samples):
+    """The return of each sample in a list of samples, in order: a list of floats."""
+    returns = []
+    for sample in samples:
+        returns.append(sample[4])
+    return returns
+
+
+def recorded_train(monkeypatch, run_dir, shuffle_control):
+    """
+    Runs the smoke-sized train once with recorders in place of learner_step and around
+    shuffle_returns, so a test sees what train handed each of them.
+    run_dir: a path that does not exist yet. shuffle_control: train's flag.
+    Returns (shuffle_calls, learner_batches, log_lines):
+      shuffle_calls: one (samples handed in, samples returned) pair per call of shuffle_returns.
+      learner_batches: the batch learner_step was handed at each update.
+      log_lines: the run's log.jsonl, one dict per update.
+    The recording learner_step updates nothing, so the net stays untrained; the batches and
+    the log are what is under test.
+    """
+    shuffle_calls = []
+    learner_batches = []
+
+    def recording_shuffle(samples, rng):
+        shuffled = shuffle_returns(samples, rng)
+        shuffle_calls.append((samples, shuffled))
+        return shuffled
+
+    def recording_learner_step(q_net, optimizer, samples):
+        learner_batches.append(samples)
+        return 0.0, 0.0
+
+    monkeypatch.setattr("stacker.dmc.shuffle_returns", recording_shuffle)
+    monkeypatch.setattr("stacker.dmc.learner_step", recording_learner_step)
+    run_dir.mkdir()
+    train(
+        DEV_SEED,
+        SMOKE_ACTORS,
+        run_dir,
+        SMOKE_UPDATES,
+        samples_per_update=SMOKE_SAMPLES_PER_UPDATE,
+        checkpoint_every=SMOKE_UPDATES,
+        shuffle_control=shuffle_control,
+    )
+
+    log_lines = []
+    with open(run_dir / "log.jsonl") as log_file:
+        for line in log_file:
+            log_lines.append(json.loads(line))
+    return shuffle_calls, learner_batches, log_lines
 
 
 def control_optimizer(q_net):
@@ -360,6 +434,43 @@ def test_old_gradients_are_cleared_before_an_update():
     assert stale_norm == pytest.approx(clean_norm, rel=STALE_GRADIENT_TOLERANCE)
 
 
+def test_shuffle_moves_only_the_returns():
+    samples, _trace = dealt_hand_samples()
+    returns_before = []
+    for sample in samples:
+        returns_before.append(sample[4])
+
+    shuffled = shuffle_returns(samples, random.Random(SHUFFLE_STREAM))
+
+    # The input list is not changed: train still holds the real batch if it wants it.
+    returns_after_call = []
+    for sample in samples:
+        returns_after_call.append(sample[4])
+    assert returns_after_call == returns_before
+
+    # State, history, history mask and taken action stay where they were. `is` compares the
+    # objects themselves, so a copy with equal numbers would not pass either.
+    assert len(shuffled) == len(samples)
+    for sample, shuffled_sample in zip(samples, shuffled):
+        for part_index in range(4):
+            assert shuffled_sample[part_index] is sample[part_index]
+
+    # The returns are the same numbers, each as often as before, in another order. So the
+    # batch's mean and variance are untouched and only the pairing with decisions is broken.
+    shuffled_returns = []
+    for shuffled_sample in shuffled:
+        shuffled_returns.append(shuffled_sample[4])
+    assert sorted(shuffled_returns) == sorted(returns_before)
+    assert shuffled_returns != returns_before
+
+    # The order comes from the rng alone: the same stream name gives the same order.
+    again = shuffle_returns(samples, random.Random(SHUFFLE_STREAM))
+    again_returns = []
+    for again_sample in again:
+        again_returns.append(again_sample[4])
+    assert again_returns == shuffled_returns
+
+
 def test_same_seed_gives_identical_results():
     first = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
     second = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
@@ -470,9 +581,14 @@ def test_two_actors_feed_the_learner(tmp_path):
         for line in log_file:
             log_lines.append(json.loads(line))
     assert len(log_lines) == SMOKE_UPDATES
-    for log_line in log_lines:
+    for line_index, log_line in enumerate(log_lines):
         assert math.isfinite(log_line["loss"])
         assert math.isfinite(log_line["gradient_norm"])
+        # samples_total is the learning curve's x-axis: the samples trained on so far.
+        assert log_line["samples_total"] == (line_index + 1) * SMOKE_SAMPLES_PER_UPDATE
+        # Returns are 0, 1 or 2, so a batch's variance is at most 1 (half 0s, half 2s), and
+        # above 0 unless every decision in the batch had the same return.
+        assert 0.0 < log_line["return_variance"] <= MAX_RETURN_VARIANCE
 
     # samples_by_actor is a running total, so the last line counts the whole run: both actors
     # delivered, and together at least what the updates used.
@@ -494,6 +610,49 @@ def test_two_actors_feed_the_learner(tmp_path):
     restored_weights = restored.state_dict()
     for name in learner_weights:
         assert torch.equal(restored_weights[name], learner_weights[name]), name
+
+    # Checkpoint 0 is the untrained net: the weights QNet() draws right after the seed is set.
+    # It is the point every later checkpoint is compared with, so one saved after any update,
+    # or from another seed, would shift the whole learning curve.
+    torch.manual_seed(DEV_SEED)
+    untrained_weights = QNet().state_dict()
+    saved_weights = torch.load(tmp_path / f"checkpoint_{0:06d}.pt")
+    assert set(saved_weights) == set(untrained_weights)
+    for name in untrained_weights:
+        assert torch.equal(saved_weights[name], untrained_weights[name]), name
+
+
+def test_shuffle_control_is_off_unless_asked_for(tmp_path, monkeypatch):
+    # Flag off: shuffle_returns is never called, so the learner trains on the real pairing.
+    shuffle_calls, learner_batches, log_lines = recorded_train(
+        monkeypatch, tmp_path / "plain", False
+    )
+    assert shuffle_calls == []
+    assert len(learner_batches) == SMOKE_UPDATES
+
+    # The logged return variance is the variance of the returns the learner was handed,
+    # dividing by the batch size (pvariance), not by one less.
+    for batch, log_line in zip(learner_batches, log_lines):
+        expected_variance = statistics.pvariance(returns_of(batch))
+        logged_variance = log_line["return_variance"]
+        assert logged_variance == pytest.approx(expected_variance, abs=VARIANCE_TOLERANCE)
+
+    # Flag on: one shuffle per update, on a full batch, and the learner gets its result.
+    shuffle_calls, learner_batches, log_lines = recorded_train(
+        monkeypatch, tmp_path / "shuffled", True
+    )
+    assert len(shuffle_calls) == SMOKE_UPDATES
+    assert len(learner_batches) == SMOKE_UPDATES
+    for shuffle_call, batch, log_line in zip(shuffle_calls, learner_batches, log_lines):
+        handed_in, shuffled = shuffle_call
+        assert len(handed_in) == SMOKE_SAMPLES_PER_UPDATE
+        # `is`: the learner's batch is the very list the shuffle returned, not the real one.
+        assert batch is shuffled
+        assert returns_of(batch) != returns_of(handed_in)
+        # A shuffle keeps the numbers, so the logged variance is the same as the real batch's.
+        expected_variance = statistics.pvariance(returns_of(handed_in))
+        logged_variance = log_line["return_variance"]
+        assert logged_variance == pytest.approx(expected_variance, abs=VARIANCE_TOLERANCE)
 
 
 def test_used_run_directory_is_refused(tmp_path):
@@ -529,3 +688,80 @@ def test_train_script_refuses_a_test_seed():
     assert finished.returncode != 0
     # The refusal comes before anything is created: no run directory is left behind.
     assert not (REPO_ROOT / "runs" / "specialist_explore" / REFUSED_RUN_NAME).exists()
+
+
+# With a GPU the flag is valid and the script would start a real run, so there is nothing to
+# refuse. The check is read when pytest collects the file, on the machine running the suite.
+@pytest.mark.skipif(torch.cuda.is_available(), reason="this machine has a CUDA GPU")
+def test_train_script_refuses_cuda_without_a_gpu():
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    command = [
+        sys.executable, str(REPO_ROOT / "scripts" / "train_dmc.py"),
+        "--seed", str(DEV_SEED), "--actors", "1", "--updates", "1",
+        "--device", "cuda", "--run-name", NO_GPU_RUN_NAME,
+    ]
+    finished = subprocess.run(
+        command, cwd=REPO_ROOT, env=environment, capture_output=True, text=True
+    )
+    run_dir = REPO_ROOT / "runs" / "specialist_explore" / NO_GPU_RUN_NAME
+    # Read before the asserts and removed after them, so a failing run leaves nothing behind
+    # to fail the next one with "run directory exists".
+    run_dir_was_made = run_dir.exists()
+    shutil.rmtree(run_dir, ignore_errors=True)
+
+    assert finished.returncode != 0
+    # The script's own message, not a crash from torch part-way into the run.
+    assert "torch finds no CUDA GPU" in finished.stderr
+    assert not run_dir_was_made
+
+
+@needs_cuda
+def test_gpu_update_gives_the_cpu_loss():
+    samples, _trace = dealt_hand_samples()
+
+    cpu_net = seeded_net()
+    cpu_loss, _ = learner_step(cpu_net, control_optimizer(cpu_net), samples)
+
+    # Same starting weights, moved to the GPU before the optimizer is built, as train does.
+    gpu_net = seeded_net().to("cuda")
+    gpu_loss, _ = learner_step(gpu_net, control_optimizer(gpu_net), samples)
+
+    assert abs(gpu_loss - cpu_loss) <= DEVICE_LOSS_TOLERANCE
+    # The update happened on the GPU: the net was not pulled back to the CPU to match the batch.
+    for name, parameter in gpu_net.named_parameters():
+        assert parameter.device.type == "cuda", name
+
+
+@needs_cuda
+def test_gpu_run_keeps_actors_and_checkpoints_on_the_cpu(tmp_path):
+    q_net, actor_net = train(
+        DEV_SEED,
+        SMOKE_ACTORS,
+        tmp_path,
+        SMOKE_UPDATES,
+        samples_per_update=SMOKE_SAMPLES_PER_UPDATE,
+        checkpoint_every=SMOKE_UPDATES,
+        device="cuda",
+    )
+
+    # Equation 13: the learner's weights are on the GPU; the actors' copy is on the CPU, still
+    # in the shared memory the actor processes read, and holds the same numbers.
+    learner_weights = q_net.state_dict()
+    actor_weights = actor_net.state_dict()
+    for name in learner_weights:
+        assert learner_weights[name].device.type == "cuda", name
+        assert actor_weights[name].device.type == "cpu", name
+        assert actor_weights[name].is_shared(), name
+        assert torch.equal(actor_weights[name], learner_weights[name].cpu()), name
+
+    # Every checkpoint is held on the CPU, so it loads on the laptop. No map_location here:
+    # torch.load then puts each tensor back where it was saved from, which is what is checked.
+    for updates_done in (0, SMOKE_UPDATES):
+        saved_weights = torch.load(tmp_path / f"checkpoint_{updates_done:06d}.pt")
+        for name in saved_weights:
+            assert saved_weights[name].device.type == "cpu", name
+
+    # The last checkpoint holds the learner's weights. saved_weights is the last one loaded.
+    for name in learner_weights:
+        assert torch.equal(saved_weights[name], learner_weights[name].cpu()), name
