@@ -34,6 +34,16 @@ from evaluate_agents import REPO_ROOT, git_state
 # pyproject.toml, which tells pytest to import from src/ and tests/.
 COPIED_DIRECTORIES = ("src", "tests", "scripts")
 COPIED_FILES = ("pyproject.toml",)
+# Makes the copy a git repo with one commit; the name and email are set here so no global git
+# config is needed, and they name no person.
+COPY_GIT_COMMANDS = (
+    ("git", "init", "-q"),
+    ("git", "add", "-A"),
+    (
+        "git", "-c", "user.name=mutation-check", "-c", "user.email=mutation-check@localhost",
+        "commit", "-q", "-m", "unchanged copy",
+    ),
+)
 # The gates under test, relative to the copy's root.
 GATES_FILES = (
     "tests/test_dmc.py",
@@ -373,6 +383,12 @@ def main():
                 )
             for file_name in COPIED_FILES:
                 shutil.copy(REPO_ROOT / file_name, copy_root / file_name)
+
+            # The scripts the gates start record the git commit they ran at and refuse to run
+            # outside a repo, so the copy becomes a repo with one commit of the unchanged code.
+            # The planted bug lands after it, as an uncommitted change.
+            for git_command in COPY_GIT_COMMANDS:
+                subprocess.run(git_command, cwd=copy_root, capture_output=True, check=True)
 
             if relative_path is not None:
                 target = copy_root / relative_path
