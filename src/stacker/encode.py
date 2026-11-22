@@ -119,8 +119,8 @@ def encode_action(action):
 # Most seats at any table. Seat one-hots are this wide in every config, so shapes never change.
 MAX_PLAYERS = max(CONFIGS)
 
-# Default history window: the M3 control reads the last 15 moves (decision log 2026-11-08;
-# the 190-move arm passes a different window).
+# Default history window: the M3 control reads the last 15 moves (decision log 2026-11-08).
+# The stage 5 window arms pass 0 and 96 (decision log 2026-11-22).
 HISTORY_WINDOW = 15
 
 # History row layout, in order:
@@ -137,12 +137,13 @@ def encode_history(observation, window=HISTORY_WINDOW):
     """
     Encodes the last `window` moves of the hand, as seen by the seat to act.
     observation: an Observation; its history is every (seat, action) so far, in play order.
-    window: int, how many recent moves to keep.
+    window: int >= 0, how many recent moves to keep; 0 keeps none (the no-history arm).
     Returns (moves, mask):
       moves float32 [window, MOVE_DIM]: one row per move, oldest first, laid out as above.
       mask bool [window]: True for a real move, False for a padding row.
     Passes count as moves, so each one takes a row. When fewer than `window` moves exist, the
-    real rows sit at the end and the padding rows at the front are all 0.
+    real rows sit at the end and the padding rows at the front are all 0. At window 0 both
+    arrays are empty: moves [0, MOVE_DIM], mask [0].
     """
     me = observation.seat
     num_players = len(observation.cards_left)
@@ -150,7 +151,11 @@ def encode_history(observation, window=HISTORY_WINDOW):
     mask = np.zeros(window, dtype=bool)
 
     # Keep only the most recent moves, then place them so the latest lands in the last row.
-    recent = observation.history[-window:]
+    # history[-0:] is the whole list in Python, so window 0 is spelled out as no moves.
+    if window == 0:
+        recent = []
+    else:
+        recent = observation.history[-window:]
     first_row = window - len(recent)
     for offset, (seat, action) in enumerate(recent):
         row = first_row + offset

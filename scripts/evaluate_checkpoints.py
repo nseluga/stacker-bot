@@ -33,9 +33,9 @@ from evaluate_agents import AGENTS, DEV_SEED_MIN, RESULTS_ROOT, git_state, selec
 from train_dmc import RUNS_DIR
 
 from stacker.dmc import choose_action
-from stacker.encode import encode_decision
+from stacker.encode import HISTORY_WINDOW, encode_decision
 from stacker.evaluate import bootstrap_ci, paired_differences
-from stacker.net import QNet
+from stacker.net import DEFAULT_HIDDEN_LAYERS, DEFAULT_HISTORY_HIDDEN, DEFAULT_MLP_WIDTH, QNet
 
 # Evaluation plays the net's best action on every turn: no random moves (equation 15).
 EVAL_EPSILON = 0.0
@@ -44,36 +44,71 @@ EVAL_EPSILON = 0.0
 # (1v3 at four players). paired_differences plays every rotation of it.
 TEST_SEATS = (0,)
 
+# The config.json keys that set the net's sizes and the history it reads (stage 5). A run's
+# checkpoint is scored with the net and window its own config names.
+NET_CONFIG_KEYS = ("width", "hidden_layers", "history_hidden", "history_window")
+# Configs written before stage 5 have none of those keys: every such run was the control, since
+# the settings did not exist yet (decision: Nate, 2026-11-22, piece 5, option C).
+CONTROL_NET_CONFIG = {
+    "width": DEFAULT_MLP_WIDTH,
+    "hidden_layers": DEFAULT_HIDDEN_LAYERS,
+    "history_hidden": DEFAULT_HISTORY_HIDDEN,
+    "history_window": HISTORY_WINDOW,
+}
+
 # Results sit under the same slug as the runs they score.
 RESULTS_DIR = RESULTS_ROOT / RUNS_DIR.name
 
 
-def load_checkpoint_net(path):
+def load_checkpoint_net(path, config):
     """
-    Builds the net a checkpoint file holds, ready to play.
+    Builds the net a checkpoint file holds, at the sizes its run used, ready to play.
     path: a checkpoint_<updates done>.pt written by stacker.dmc.train (a QNet state_dict).
-    Returns a QNet on the CPU, in eval mode.
+    config: the run's config.json, loaded.
+    Returns (net, history_window): a QNet on the CPU, in eval mode, and the number of history
+      moves its decisions must be encoded with.
+    A config with none of NET_CONFIG_KEYS is from before stage 5 and gets the control's values.
+    Raises ValueError for a config with some of the keys but not all: a stage 5 config always
+    has every one, so a gap is a broken record, never filled in.
     """
-    net = QNet()
+    missing = []
+    for key in NET_CONFIG_KEYS:
+        if key not in config:
+            missing.append(key)
+    if len(missing) == len(NET_CONFIG_KEYS):
+        net_config = CONTROL_NET_CONFIG
+    elif missing:
+        raise ValueError(f"run config lacks {missing}; it has the other stage 5 net keys")
+    else:
+        net_config = config
+
+    # A size that does not match the saved weights makes load_state_dict raise, so a wrong size
+    # fails loudly. A wrong window would not (the LSTM reads any number of rows), which is why
+    # the window is returned from the same config instead of left to a default.
+    net = QNet(
+        width=net_config["width"],
+        hidden_layers=net_config["hidden_layers"],
+        history_hidden=net_config["history_hidden"],
+    )
     # map_location: a checkpoint is saved from the CPU copy, but loading must not depend on it.
     # weights_only: the file holds tensors only, so torch refuses to run any code stored in it.
     net.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
     # Eval mode turns off anything that behaves differently in training (dropout, batch
     # statistics). QNet has none today; this keeps evaluation right if one is added.
     net.eval()
-    return net
+    return net, net_config["history_window"]
 
 
-def checkpoint_agent(net, observation, actions, rng):
+def checkpoint_agent(net, history_window, observation, actions, rng):
     """
     Plays the action the net scores highest (equation 15).
-    net: a QNet from load_checkpoint_net. The caller binds it with functools.partial, since
-    play_out calls an agent as agent(observation, actions, rng).
+    net, history_window: as load_checkpoint_net returns them. The caller binds both with
+    functools.partial, since play_out calls an agent as agent(observation, actions, rng).
     observation, actions, rng: as play_out passes them. Returns one of actions.
     A forced turn (one legal action) returns it without calling the net; equal scores go to the
     lowest index; no gradients are recorded. All three are choose_action's own behaviour.
     """
-    decision = encode_decision(observation, actions)
+    decision = encode_decision(observation, actions, history_window)
     # With epsilon 0 choose_action still draws one number from rng on a turn with a choice, and
     # then never takes the random branch. The draw is the same on every replay of a deal.
     index = choose_action(net, decision, EVAL_EPSILON, rng)
@@ -83,8 +118,9 @@ def checkpoint_agent(net, observation, actions, rng):
 def evaluate_checkpoint(task):
     """
     Scores one checkpoint against one field agent on dev deals. Runs in a worker process.
-    task: (checkpoint_path, field_name, num_players, num_deals, seed), one tuple because a
-    process pool hands a worker one argument. field_name is a key of AGENTS; seed is ≥ 10.
+    task: (checkpoint_path, field_name, num_players, num_deals, seed, run_config), one tuple
+    because a process pool hands a worker one argument. field_name is a key of AGENTS; seed is
+    ≥ 10; run_config is the run's config.json, which names the net's sizes and window.
     Returns a dict: checkpoint (file name), field, mean, ci_low, ci_high (95% bootstrap CI of
     the mean), standard_deviation, seconds (play time), differences (list of num_deals floats,
     the per-deal paired differences in deal order). Positive means the checkpoint is stronger.
@@ -93,14 +129,14 @@ def evaluate_checkpoint(task):
     rng is named by seed, deal and rotation, never by the checkpoint. So two checkpoints'
     differences can be compared deal by deal.
     """
-    checkpoint_path, field_name, num_players, num_deals, seed = task
+    checkpoint_path, field_name, num_players, num_deals, seed, run_config = task
 
     # Many workers run at once, one per core. Torch's default would give each of them a thread
     # per core, all waiting on each other.
     torch.set_num_threads(1)
 
-    net = load_checkpoint_net(checkpoint_path)
-    test_agent = functools.partial(checkpoint_agent, net)
+    net, history_window = load_checkpoint_net(checkpoint_path, run_config)
+    test_agent = functools.partial(checkpoint_agent, net, history_window)
 
     # False: dev deals. It is fixed here, so no argument can reach the sealed set, and
     # select_deals raises on a seed below 10.
@@ -183,7 +219,9 @@ def main():
     tasks = []
     for path in updates_by_path:
         for field_name in field_names:
-            tasks.append((str(path), field_name, run_config["players"], args.deals, args.seed))
+            tasks.append(
+                (str(path), field_name, run_config["players"], args.deals, args.seed, run_config)
+            )
 
     # sched_getaffinity (Linux only) counts the cores this process may use, which on a shared
     # machine can be fewer than the machine has.

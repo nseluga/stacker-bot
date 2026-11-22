@@ -239,6 +239,51 @@ def test_long_history_keeps_last_window_moves():
     assert moves[-1][MOVE_SEAT].argmax() == 19 % 4
 
 
+# The stage 5 window arms (decision log 2026-11-22).
+NO_HISTORY_WINDOW = 0
+WHOLE_HAND_WINDOW = 96
+
+
+def test_window_zero_keeps_no_moves():
+    # catches: history[-0:], which keeps the whole hand instead of none of it.
+    history = [(3, make_play("3s")), (0, PASS), (1, make_play("5h"))]
+    moves, mask = encode_history(observation_with_history(2, 4, history), NO_HISTORY_WINDOW)
+    assert moves.shape == (0, MOVE_DIM)
+    assert mask.shape == (0,)
+
+
+def test_window_96_rows_are_the_hands_moves_in_play_order():
+    # catches: rows taken from the wrong end, reversed, or still cut at 15.
+    # A real 4-player hand, stopped at its last decision, so it runs well past 15 moves.
+    last_observation = []
+
+    def recording_agent(observation, actions, rng):
+        last_observation[:] = [observation]
+        return actions[0]
+
+    rng = random.Random(DEV_SEED)
+    play_out(new_hand(4, rng), [recording_agent] * 4, rng)
+    observation = last_observation[0]
+    num_moves = len(observation.history)
+    assert HISTORY_WINDOW < num_moves < WHOLE_HAND_WINDOW
+
+    moves, mask = encode_history(observation, WHOLE_HAND_WINDOW)
+    first_real_row = WHOLE_HAND_WINDOW - num_moves
+    assert mask.tolist() == [False] * first_real_row + [True] * num_moves
+    assert moves[:first_real_row].sum() == 0
+
+    # Each real row, oldest first, is built straight from the move it stands for.
+    for move_number, (seat, action) in enumerate(observation.history):
+        row = moves[first_real_row + move_number]
+        assert row[MOVE_SEAT].argmax() == relative_slot(seat, observation.seat, 4)
+        if action == PASS:
+            assert row[MOVE_PASS] == 1.0
+            assert row[MOVE_CARDS].sum() == 0
+        else:
+            assert row[MOVE_PASS] == 0.0
+            assert (row[MOVE_CARDS] == card_grid(action.cards).reshape(-1)).all()
+
+
 def test_history_shape_is_the_same_in_every_config():
     # Play real dealt hands with a first-legal-action agent, encoding every observation on the way.
     seen_moves = []

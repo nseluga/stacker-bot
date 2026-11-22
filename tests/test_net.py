@@ -239,6 +239,26 @@ def test_masked_history_cannot_change_q():
         assert not torch.equal(q_before, q_real_changed)
 
 
+def test_window_zero_scores_as_if_the_summary_were_zero():
+    # catches: z built by running the LSTM on a zero row, which leaks its biases into z.
+    torch.manual_seed(DEV_SEED)
+    net = QNet()
+    batch_size, num_actions = 3, 4
+    state = torch.rand(batch_size, STATE_DIM)
+    actions = torch.rand(batch_size, num_actions, ACTION_DIM)
+    action_mask = torch.ones(batch_size, num_actions, dtype=torch.bool)
+    no_history = torch.zeros(batch_size, 0, MOVE_DIM)
+    no_history_mask = torch.zeros(batch_size, 0, dtype=torch.bool)
+
+    q_values = net(state, no_history, no_history_mask, actions, action_mask)
+
+    # The MLP by hand on [0; s; a]: the summary block of the input is all zeros.
+    zero_summary = torch.zeros(batch_size, num_actions, DEFAULT_HISTORY_HIDDEN)
+    state_per_action = state.unsqueeze(1).expand(-1, num_actions, -1)
+    by_hand = net.mlp(torch.cat([zero_summary, state_per_action, actions], dim=-1)).squeeze(-1)
+    assert torch.equal(q_values, by_hand)
+
+
 def test_q_is_the_same_alone_and_in_a_batch():
     decisions, batch, _, _ = fixed_batch()
     net = seeded_net()

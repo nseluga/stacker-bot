@@ -23,7 +23,7 @@ from test_net import DEV_SEED, seeded_net
 
 from stacker.encode import encode_decision
 from stacker.evaluate import bootstrap_ci, paired_differences
-from stacker.net import collate_decisions
+from stacker.net import QNet, collate_decisions
 
 # scripts/ is not a package, and evaluate_checkpoints.py imports its neighbours by name
 # (evaluate_agents, train_dmc), so the folder goes on the import path.
@@ -41,6 +41,10 @@ FIELD_NAME = "random"
 # A test seed (rule 2: 0-2 are for confirm runs) and the run name the refused run is given.
 REFUSED_SEED = 2
 REFUSED_RUN_NAME = "gate_refused_test_seed"
+# A config.json from before stage 5: none of the net keys, so the control net at window 15.
+PRE_STAGE_5_CONFIG = {}
+# The widest arm (decision log 2026-11-22), as a full stage 5 config's net keys.
+WIDE_CONFIG = {"width": 1024, "hidden_layers": 5, "history_hidden": 128, "history_window": 15}
 
 
 def save_seeded_checkpoint(tmp_path):
@@ -51,7 +55,10 @@ def save_seeded_checkpoint(tmp_path):
 
 
 def test_loaded_checkpoint_is_ready_to_play(tmp_path):
-    net = evaluate_checkpoints.load_checkpoint_net(save_seeded_checkpoint(tmp_path))
+    net, history_window = evaluate_checkpoints.load_checkpoint_net(
+        save_seeded_checkpoint(tmp_path), PRE_STAGE_5_CONFIG
+    )
+    assert history_window == 15
 
     # Eval mode: nothing in the net behaves as it does in training.
     assert net.training is False
@@ -65,7 +72,9 @@ def test_loaded_checkpoint_is_ready_to_play(tmp_path):
 
 
 def test_agent_plays_the_highest_scoring_action(tmp_path):
-    net = evaluate_checkpoints.load_checkpoint_net(save_seeded_checkpoint(tmp_path))
+    net, history_window = evaluate_checkpoints.load_checkpoint_net(
+        save_seeded_checkpoint(tmp_path), PRE_STAGE_5_CONFIG
+    )
     # Same weights in a second net, so working out the expected action adds no call to `net`.
     reference_net = seeded_net()
 
@@ -82,7 +91,9 @@ def test_agent_plays_the_highest_scoring_action(tmp_path):
 
     def watched_agent(observation, actions, rng):
         calls_before = len(net_calls)
-        action = evaluate_checkpoints.checkpoint_agent(net, observation, actions, rng)
+        action = evaluate_checkpoints.checkpoint_agent(
+            net, history_window, observation, actions, rng
+        )
 
         if len(actions) == 1:
             # Forced turn: the only action, and the net was not called.
@@ -127,7 +138,14 @@ def test_same_checkpoint_scores_the_same_twice(tmp_path, monkeypatch):
 
     monkeypatch.setattr(evaluate_checkpoints, "bootstrap_ci", recording_bootstrap)
 
-    task = (str(save_seeded_checkpoint(tmp_path)), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, DEV_SEED)
+    task = (
+        str(save_seeded_checkpoint(tmp_path)),
+        FIELD_NAME,
+        NUM_PLAYERS,
+        GATE_DEALS,
+        DEV_SEED,
+        PRE_STAGE_5_CONFIG,
+    )
     first = evaluate_checkpoints.evaluate_checkpoint(task)
     second = evaluate_checkpoints.evaluate_checkpoint(task)
 
@@ -142,6 +160,47 @@ def test_same_checkpoint_scores_the_same_twice(tmp_path, monkeypatch):
     assert bootstrap_draws == [expected_draw, expected_draw]
 
 
+def test_a_1024_wide_checkpoint_loads_and_scores(tmp_path):
+    # catches: a loader that builds the control net whatever the config says.
+    torch.manual_seed(DEV_SEED)
+    path = tmp_path / "checkpoint_000000.pt"
+    torch.save(QNet(width=1024).state_dict(), path)
+    task = (str(path), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, DEV_SEED, WIDE_CONFIG)
+    result = evaluate_checkpoints.evaluate_checkpoint(task)
+    assert len(result["differences"]) == GATE_DEALS
+
+
+def test_a_config_missing_one_net_key_is_refused(tmp_path):
+    # catches: a gap in a stage 5 config filled in with the control's value.
+    partial_config = dict(WIDE_CONFIG)
+    del partial_config["history_window"]
+    with pytest.raises(ValueError, match="history_window"):
+        evaluate_checkpoints.load_checkpoint_net(save_seeded_checkpoint(tmp_path), partial_config)
+
+
+def test_decisions_are_encoded_at_the_runs_window(tmp_path, monkeypatch):
+    # catches: eval encoding at 15 whatever window the run trained with.
+    history_rows_seen = []
+
+    def recording_choose_action(net, decision, epsilon, rng):
+        history_rows_seen.append(decision[1].shape[0])
+        return 0
+
+    monkeypatch.setattr(evaluate_checkpoints, "choose_action", recording_choose_action)
+    window_zero_config = dict(evaluate_checkpoints.CONTROL_NET_CONFIG, history_window=0)
+    task = (
+        str(save_seeded_checkpoint(tmp_path)),
+        FIELD_NAME,
+        NUM_PLAYERS,
+        GATE_DEALS,
+        DEV_SEED,
+        window_zero_config,
+    )
+    evaluate_checkpoints.evaluate_checkpoint(task)
+    assert len(history_rows_seen) > 0
+    assert set(history_rows_seen) == {0}
+
+
 def test_scoring_never_loads_the_sealed_deals(tmp_path, monkeypatch):
     def refuse_sealed(num_players):
         raise AssertionError("evaluate_checkpoint asked for the sealed deals")
@@ -150,7 +209,14 @@ def test_scoring_never_loads_the_sealed_deals(tmp_path, monkeypatch):
     # so this stand-in runs if any path reaches the sealed set.
     monkeypatch.setattr(evaluate_agents, "load_sealed", refuse_sealed)
 
-    task = (str(save_seeded_checkpoint(tmp_path)), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, DEV_SEED)
+    task = (
+        str(save_seeded_checkpoint(tmp_path)),
+        FIELD_NAME,
+        NUM_PLAYERS,
+        GATE_DEALS,
+        DEV_SEED,
+        PRE_STAGE_5_CONFIG,
+    )
     result = evaluate_checkpoints.evaluate_checkpoint(task)
     assert len(result["differences"]) == GATE_DEALS
 
@@ -159,7 +225,12 @@ def test_function_refuses_a_test_seed(tmp_path):
     # The real load_sealed is in place here: a wrong path to the sealed deals would return them
     # and not raise.
     task = (
-        str(save_seeded_checkpoint(tmp_path)), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, REFUSED_SEED
+        str(save_seeded_checkpoint(tmp_path)),
+        FIELD_NAME,
+        NUM_PLAYERS,
+        GATE_DEALS,
+        REFUSED_SEED,
+        PRE_STAGE_5_CONFIG,
     )
     with pytest.raises(ValueError, match="dev runs use seeds"):
         evaluate_checkpoints.evaluate_checkpoint(task)

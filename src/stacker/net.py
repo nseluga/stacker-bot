@@ -119,8 +119,16 @@ class QNet(nn.Module):
         Summarizes each decision's recent moves as one vector z (spec part 2, equations 1-2).
         history: float32 [B, H, MOVE_DIM], oldest move first, padded at the front.
         history_mask: bool [B, H], True for real moves.
-        Returns z, float32 [B, history_hidden].
+        Returns z, float32 [B, history_hidden]. With H = 0 (the no-history arm) z is all 0.
         """
+        # No rows (window 0): the LSTM's memory starts at 0 and, reading nothing, stays there, so
+        # z is 0. The LSTM is skipped because it refuses a sequence of length 0. Running it on a
+        # row of zeros instead would not give 0: its biases would leak a learned constant into z.
+        # The LSTM's weights then get no gradient, by design.
+        batch_size, num_rows, _ = history.shape
+        if num_rows == 0:
+            return history.new_zeros(batch_size, self.history_lstm.hidden_size)
+
         # Equation 1: a padded row is multiplied by 0 and a real row by 1, so whatever a padded
         # row holds cannot reach the LSTM. The new last axis lets [B, H] scale each row's values.
         masked_history = history * history_mask.unsqueeze(-1)

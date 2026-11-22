@@ -30,7 +30,7 @@ from pathlib import Path
 
 import torch
 
-from stacker.encode import encode_decision
+from stacker.encode import HISTORY_WINDOW, encode_decision
 from stacker.game import new_hand, play_out
 from stacker.net import (
     DEFAULT_HIDDEN_LAYERS,
@@ -113,13 +113,14 @@ def choose_action(q_net, decision, epsilon, rng):
     return int(q_values[0].argmax())
 
 
-def self_play_hand(state, q_net, epsilon, rng):
+def self_play_hand(state, q_net, epsilon, rng, history_window=HISTORY_WINDOW):
     """
     Plays one dealt hand with q_net in every seat and returns a training sample per decision
     (spec part 8, equations 8-9).
     state: a HandState, already dealt (changed in place, as play_out does).
     q_net: a QNet. epsilon: exploration probability, passed to choose_action.
     rng: a random.Random; drives every random pick in the hand.
+    history_window: int, moves of history each decision is encoded with (H below).
     Returns (samples, trace).
       samples: list in play order, one per decision, forced turns included. Each is
         (state_vector [STATE_DIM], history [H, MOVE_DIM], history_mask [H],
@@ -133,7 +134,7 @@ def self_play_hand(state, q_net, epsilon, rng):
     records = []
 
     def recording_agent(observation, actions, agent_rng):
-        decision = encode_decision(observation, actions)
+        decision = encode_decision(observation, actions, history_window)
         index = choose_action(q_net, decision, epsilon, agent_rng)
         state_vector, history, history_mask, action_matrix = decision
 
@@ -346,7 +347,7 @@ def train_one_process(seed, num_updates, samples_per_update):
     return results
 
 
-def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon):
+def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon, history_window):
     """
     Plays hands forever and queues their samples: the target function of one actor process
     (spec parts 7-8). Never returns; the process that started it ends it.
@@ -356,6 +357,8 @@ def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon):
     sample_queue: a bounded multiprocessing queue. Each item put on it is (actor_id, samples):
       the samples of one finished hand, as self_play_hand gives them.
     epsilon: exploration probability, passed to self_play_hand.
+    history_window: int, the run's history window, passed to self_play_hand. The samples arrive
+      at the learner already encoded at this window, so the learner needs no window of its own.
     """
     # By default torch spreads one forward pass over every core. With one actor process per
     # core that would be many times more threads than cores, each waiting on the others.
@@ -369,7 +372,7 @@ def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon):
         # The learner may be writing new weights while this hand is played, with no lock, as
         # in DouZero: a decision can be scored by a mix of the old and new weights, which
         # differ by one small update.
-        samples, _ = self_play_hand(state, actor_net, epsilon, hand_rng)
+        samples, _ = self_play_hand(state, actor_net, epsilon, hand_rng, history_window)
 
         # put waits while the queue is full. That wait is the brake: actors cannot make
         # samples faster than the learner uses them and fill memory.
@@ -395,6 +398,7 @@ def train(
     width=DEFAULT_MLP_WIDTH,
     hidden_layers=DEFAULT_HIDDEN_LAYERS,
     history_hidden=DEFAULT_HISTORY_HIDDEN,
+    history_window=HISTORY_WINDOW,
 ):
     """
     Runs the training loop with actors in their own processes (spec parts 7-9 and 12).
@@ -416,6 +420,7 @@ def train(
     learning_rate, optimizer: the step size and "rmsprop" or "adam", passed to build_optimizer.
     epsilon: probability that an actor plays a random action on a turn with a choice.
     width, hidden_layers, history_hidden: the net's sizes, passed to QNet for both nets.
+    history_window: moves of history the actors encode each decision with (0 = none).
     Returns (q_net, actor_net): the trained learner net, on device, and the shared net the
       actors played with, on the CPU, which holds the same weights.
     Must be called under `if __name__ == "__main__":` in a script: each actor process starts by
@@ -463,7 +468,7 @@ def train(
         # daemon: the actor is ended with this process, even if the cleanup below never runs.
         actor = context.Process(
             target=actor_loop,
-            args=(actor_id, seed, actor_net, sample_queue, epsilon),
+            args=(actor_id, seed, actor_net, sample_queue, epsilon, history_window),
             daemon=True,
         )
         actor.start()

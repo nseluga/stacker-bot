@@ -43,6 +43,10 @@ import torch
 from helpers import parse_cards
 from test_net import DEV_SEED, real_decisions, seeded_net
 
+# scripts/ is not a package, so the folder goes on the import path for train_dmc.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import train_dmc  # noqa: E402
+
 from stacker.dmc import (
     EPSILON,
     LEARNING_RATE,
@@ -75,6 +79,12 @@ ARM_WIDTH = 256
 ARM_HIDDEN_LAYERS = 3
 ARM_HISTORY_HIDDEN = 256
 ARM_PARAMETER_COUNT = 1_118_465
+# The whole-hand window arm (decision log 2026-11-22).
+ARM_HISTORY_WINDOW = 96
+# Arm tag of the script gate's tiny run; it ends the run directory's name.
+SCRIPT_ARM_TAG = "script-flags-gate"
+# Run name of that gate's base: a tiny control run made just before the arm.
+SCRIPT_BASE_RUN = "script-flags-gate-base"
 # Legal actions of the decision the pick tests use.
 PICK_NUM_ACTIONS = 5
 # Hand-set Q for those actions: the highest is at index 3, not at either end.
@@ -578,7 +588,7 @@ def test_actor_plays_the_hands_its_stream_names():
         for actor_id in range(STREAM_GATE_ACTORS):
             sample_queue = StoppingQueue(STREAM_GATE_HANDS)
             with pytest.raises(QueueFull):
-                actor_loop(actor_id, DEV_SEED, q_net, sample_queue, 0.0)
+                actor_loop(actor_id, DEV_SEED, q_net, sample_queue, 0.0, HISTORY_WINDOW)
 
             hands = []
             for queued_actor_id, samples in sample_queue.items:
@@ -618,6 +628,7 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
     # as a control value below.
     actor_arguments = []
     learner_optimizers = []
+    learner_batches = []
 
     # The real "spawn" context, wrapped so each actor's arguments are seen as it is started.
     real_context = torch.multiprocessing.get_context("spawn")
@@ -634,6 +645,7 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
 
     def recording_learner_step(q_net, optimizer, samples):
         learner_optimizers.append(optimizer)
+        learner_batches.append(samples)
         return 0.0, 0.0
 
     monkeypatch.setattr(torch.multiprocessing, "get_context", recording_get_context)
@@ -651,6 +663,7 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
         width=ARM_WIDTH,
         hidden_layers=ARM_HIDDEN_LAYERS,
         history_hidden=ARM_HISTORY_HIDDEN,
+        history_window=ARM_HISTORY_WINDOW,
     )
 
     # The sizes reached the learner's net and the actors' net.
@@ -663,10 +676,16 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
         assert type(optimizer) is torch.optim.Adam
         assert optimizer.param_groups[0]["lr"] == ARM_LEARNING_RATE
 
-    # Every actor was started with the run's epsilon: the last of actor_loop's arguments.
+    # Every actor was started with the run's epsilon: actor_loop's fifth argument.
     assert len(actor_arguments) == SMOKE_ACTORS
     for arguments in actor_arguments:
-        assert arguments[-1] == 0.0
+        assert arguments[4] == 0.0
+
+    # The actors encoded at the run's window: every sample the learner got has 96 history rows.
+    for samples in learner_batches:
+        for sample in samples:
+            history = sample[1]
+            assert history.shape == (ARM_HISTORY_WINDOW, MOVE_DIM)
 
 
 def test_two_actors_feed_the_learner(tmp_path):
@@ -791,6 +810,87 @@ def test_train_script_refuses_a_test_seed():
     assert finished.returncode != 0
     # The refusal comes before anything is created: no run directory is left behind.
     assert not (REPO_ROOT / "runs" / "specialist_explore" / REFUSED_RUN_NAME).exists()
+
+
+def test_train_script_passes_its_arm_flags_on():
+    # A tiny real run through the script with every arm flag off the control, against a tiny
+    # control run as its base. The arm's run name is left to the script, so the tag's place in
+    # it is checked too.
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    runs_dir = REPO_ROOT / "runs" / "specialist_explore"
+    # Left behind by an earlier failed run of this test, the directory would be refused.
+    for old_run_dir in runs_dir.glob(f"*_seed{DEV_SEED}_{SCRIPT_ARM_TAG}"):
+        shutil.rmtree(old_run_dir)
+    shutil.rmtree(runs_dir / SCRIPT_BASE_RUN, ignore_errors=True)
+    tiny_run = [
+        sys.executable, str(REPO_ROOT / "scripts" / "train_dmc.py"),
+        "--seed", str(DEV_SEED), "--actors", "1", "--updates", "1",
+        "--samples-per-update", str(SMOKE_SAMPLES_PER_UPDATE),
+    ]
+    base_finished = subprocess.run(
+        tiny_run + ["--run-name", SCRIPT_BASE_RUN],
+        cwd=REPO_ROOT, env=environment, capture_output=True, text=True,
+    )
+    command = [
+        sys.executable, str(REPO_ROOT / "scripts" / "train_dmc.py"),
+        "--seed", str(DEV_SEED), "--actors", "1", "--updates", "1",
+        "--samples-per-update", str(SMOKE_SAMPLES_PER_UPDATE),
+        "--width", str(ARM_WIDTH), "--layers", str(ARM_HIDDEN_LAYERS),
+        "--history-hidden", str(ARM_HISTORY_HIDDEN), "--lr", str(ARM_LEARNING_RATE),
+        "--history-window", str(ARM_HISTORY_WINDOW),
+        "--epsilon", "0.0", "--optimizer", "adam", "--arm", SCRIPT_ARM_TAG,
+        "--base-run", SCRIPT_BASE_RUN,
+    ]
+    finished = subprocess.run(
+        command, cwd=REPO_ROOT, env=environment, capture_output=True, text=True
+    )
+    # Read everything the asserts need, then remove the run, so a failure leaves nothing behind.
+    run_dirs = list(runs_dir.glob(f"*_seed{DEV_SEED}_{SCRIPT_ARM_TAG}"))
+    config = None
+    checkpoint_weights = None
+    if len(run_dirs) == 1:
+        with open(run_dirs[0] / "config.json") as file:
+            config = json.load(file)
+        checkpoint_weights = torch.load(run_dirs[0] / f"checkpoint_{0:06d}.pt")
+    for run_dir in run_dirs:
+        shutil.rmtree(run_dir)
+    shutil.rmtree(runs_dir / SCRIPT_BASE_RUN, ignore_errors=True)
+
+    assert base_finished.returncode == 0, base_finished.stderr
+    assert finished.returncode == 0, finished.stderr
+    # Exactly one run, its name ending in the tag.
+    assert len(run_dirs) == 1
+    assert config["arm"] == SCRIPT_ARM_TAG
+    assert config["width"] == ARM_WIDTH
+    assert config["hidden_layers"] == ARM_HIDDEN_LAYERS
+    assert config["history_hidden"] == ARM_HISTORY_HIDDEN
+    assert config["history_window"] == ARM_HISTORY_WINDOW
+    assert config["learning_rate"] == ARM_LEARNING_RATE
+    assert config["epsilon"] == 0.0
+    assert config["optimizer"] == "adam"
+    assert config["base_run"] == SCRIPT_BASE_RUN
+    # The net that was trained has the arm's size, not only the record of it.
+    total = 0
+    for weights in checkpoint_weights.values():
+        total += weights.numel()
+    assert total == ARM_PARAMETER_COUNT
+
+
+def test_arm_config_may_differ_from_its_base_only_where_named():
+    base_config = {"seed": 20, "width": 1024, "learning_rate": 3e-4, "git_commit": "aaa"}
+    # The depth arm on a re-based width-1024 net, run at a later commit. The commit differs
+    # and is bookkeeping; the width differs too, which is a forgotten --width 1024.
+    arm_config = {"seed": 20, "width": 512, "learning_rate": 3e-4, "git_commit": "bbb"}
+
+    # Named: allowed. The commit is not named and must not stop the run.
+    assert train_dmc.check_against_base(arm_config, base_config, {"width"}) is None
+
+    # Not named: refused, and the message says which key.
+    with pytest.raises(SystemExit) as refusal:
+        train_dmc.check_against_base(arm_config, base_config, set())
+    assert "width" in str(refusal.value)
+    assert "git_commit" not in str(refusal.value)
 
 
 # With a GPU the flag is valid and the script would start a real run, so there is nothing to
