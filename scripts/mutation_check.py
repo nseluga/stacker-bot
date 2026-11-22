@@ -189,8 +189,8 @@ MUTATIONS = (
     (
         "train starts from another seed",
         DMC,
-        "    torch.manual_seed(seed)\n    q_net = QNet()\n\n",
-        "    torch.manual_seed(seed + 1)\n    q_net = QNet()\n\n",
+        "    torch.manual_seed(seed)\n    q_net = QNet(width=width,",
+        "    torch.manual_seed(seed + 1)\n    q_net = QNet(width=width,",
     ),
     (
         "checkpoint 0 is not the starting net",
