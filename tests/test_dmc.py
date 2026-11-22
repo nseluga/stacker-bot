@@ -9,6 +9,10 @@ The batch: one action row per sample (K = 1), returns with one axis.
 The update: the loss falls on a fixed batch; one step moves every parameter; a gradient longer
 than MAX_GRAD_NORM is cut to exactly that length; gradients left from an earlier update are
 cleared first.
+The optimizer: build_optimizer gives the optimizer and the rate it was asked for, with the
+spec's other settings (part 17), and refuses a name it does not know.
+The arm arguments: train hands its sizes to both nets, its optimizer name and rate to the
+learner, and its epsilon to every actor.
 The loop: the same seed gives the same result; another seed does not; no sample is trained on
 twice.
 The streams: a training hand's rng name uses the seed, the actor and the hand number, and is
@@ -48,6 +52,7 @@ from stacker.dmc import (
     RMSPROP_EPS,
     RMSPROP_MOMENTUM,
     actor_loop,
+    build_optimizer,
     choose_action,
     collate_samples,
     hand_stream_name,
@@ -61,6 +66,15 @@ from stacker.encode import ACTION_DIM, HISTORY_WINDOW, MOVE_DIM, STATE_DIM, enco
 from stacker.game import HandState, new_hand
 from stacker.net import QNet
 
+# A rate that is not the control's 1e-4, so a rate that build_optimizer drops shows up.
+ARM_LEARNING_RATE = 3e-4
+# An arm net for the pass-through gate: width 256, 3 hidden layers and summary size 256, all
+# off the control. Its weight count from spec part 16: 379,904 (LSTM) + 606,720 + 2 x 65,792
+# + 257.
+ARM_WIDTH = 256
+ARM_HIDDEN_LAYERS = 3
+ARM_HISTORY_HIDDEN = 256
+ARM_PARAMETER_COUNT = 1_118_465
 # Legal actions of the decision the pick tests use.
 PICK_NUM_ACTIONS = 5
 # Hand-set Q for those actions: the highest is at index 3, not at either end.
@@ -434,6 +448,31 @@ def test_old_gradients_are_cleared_before_an_update():
     assert stale_norm == pytest.approx(clean_norm, rel=STALE_GRADIENT_TOLERANCE)
 
 
+def test_optimizer_is_built_as_named():
+    net = seeded_net()
+    # The settings are written out here, not imported, so a changed constant fails the gate.
+    rmsprop = build_optimizer(net, "rmsprop", ARM_LEARNING_RATE)
+    assert type(rmsprop) is torch.optim.RMSprop
+    settings = rmsprop.param_groups[0]
+    assert settings["lr"] == ARM_LEARNING_RATE
+    assert settings["alpha"] == 0.99
+    assert settings["eps"] == 1e-5
+    assert settings["momentum"] == 0.0
+    assert settings["weight_decay"] == 0.0
+
+    adam = build_optimizer(net, "adam", ARM_LEARNING_RATE)
+    assert type(adam) is torch.optim.Adam
+    settings = adam.param_groups[0]
+    assert settings["lr"] == ARM_LEARNING_RATE
+    assert settings["betas"] == (0.9, 0.999)
+    assert settings["eps"] == 1e-8
+    assert settings["weight_decay"] == 0.0
+
+    # A name that is not one of the two must stop the run, not train the control.
+    with pytest.raises(ValueError):
+        build_optimizer(net, "adamw", ARM_LEARNING_RATE)
+
+
 def test_shuffle_moves_only_the_returns():
     samples, _trace = dealt_hand_samples()
     returns_before = []
@@ -564,6 +603,70 @@ def test_actor_plays_the_hands_its_stream_names():
     # not play the same deal twice. Without this, training would count one hand many times.
     assert not samples_equal(hands_by_actor[0][0], hands_by_actor[1][0])
     assert not samples_equal(hands_by_actor[0][0], hands_by_actor[0][1])
+
+
+def parameter_count(net):
+    """The number of weights in a net: an int."""
+    total = 0
+    for parameter in net.parameters():
+        total += parameter.numel()
+    return total
+
+
+def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
+    # Every argument is off its default, so one that train accepts and then ignores shows up
+    # as a control value below.
+    actor_arguments = []
+    learner_optimizers = []
+
+    # The real "spawn" context, wrapped so each actor's arguments are seen as it is started.
+    real_context = torch.multiprocessing.get_context("spawn")
+
+    class RecordingContext:
+        Queue = real_context.Queue
+
+        def Process(self, target, args, daemon):
+            actor_arguments.append(args)
+            return real_context.Process(target=target, args=args, daemon=daemon)
+
+    def recording_get_context(method):
+        return RecordingContext()
+
+    def recording_learner_step(q_net, optimizer, samples):
+        learner_optimizers.append(optimizer)
+        return 0.0, 0.0
+
+    monkeypatch.setattr(torch.multiprocessing, "get_context", recording_get_context)
+    monkeypatch.setattr("stacker.dmc.learner_step", recording_learner_step)
+    q_net, actor_net = train(
+        DEV_SEED,
+        SMOKE_ACTORS,
+        tmp_path,
+        SMOKE_UPDATES,
+        samples_per_update=SMOKE_SAMPLES_PER_UPDATE,
+        checkpoint_every=SMOKE_UPDATES,
+        learning_rate=ARM_LEARNING_RATE,
+        epsilon=0.0,
+        optimizer="adam",
+        width=ARM_WIDTH,
+        hidden_layers=ARM_HIDDEN_LAYERS,
+        history_hidden=ARM_HISTORY_HIDDEN,
+    )
+
+    # The sizes reached the learner's net and the actors' net.
+    assert parameter_count(q_net) == ARM_PARAMETER_COUNT
+    assert parameter_count(actor_net) == ARM_PARAMETER_COUNT
+
+    # The learner trained with the optimizer and the rate that were named, at every update.
+    assert len(learner_optimizers) == SMOKE_UPDATES
+    for optimizer in learner_optimizers:
+        assert type(optimizer) is torch.optim.Adam
+        assert optimizer.param_groups[0]["lr"] == ARM_LEARNING_RATE
+
+    # Every actor was started with the run's epsilon: the last of actor_loop's arguments.
+    assert len(actor_arguments) == SMOKE_ACTORS
+    for arguments in actor_arguments:
+        assert arguments[-1] == 0.0
 
 
 def test_two_actors_feed_the_learner(tmp_path):

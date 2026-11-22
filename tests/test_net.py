@@ -6,6 +6,8 @@ of legal actions and different history lengths, which is what padding and maskin
 
 Batch: collated rows equal the encode_decision rows they came from; padding is zero and masked.
 Shapes: the same in all six configs; the parameter count is the spec's.
+Sizes (stage 5, spec part 16): QNet() is still the control, weight for weight; each arm shape
+has the weight count the spec's formula gives.
 Masking: padded action rows and masked history rows cannot change a real Q.
 Batch independence: a decision's Q is the same alone and inside a batch, within rounding.
 Loss: an untrained net starts near mean(return^2); only the taken action's Q gets gradient; every
@@ -14,6 +16,7 @@ Training: the same seed gives the same losses; eval passes repeat exactly; the n
 8 decisions.
 """
 
+import hashlib
 import random
 
 import torch
@@ -21,7 +24,7 @@ import torch
 from stacker.cards import CONFIGS
 from stacker.encode import ACTION_DIM, HISTORY_WINDOW, MOVE_DIM, STATE_DIM, encode_decision
 from stacker.game import new_hand, play_out
-from stacker.net import HISTORY_HIDDEN, QNet, collate_decisions, q_loss
+from stacker.net import DEFAULT_HISTORY_HIDDEN, QNet, collate_decisions, q_loss
 
 # Dev seed for dealing hands and creating nets (rule 2: seeds >= 10 outside confirm runs).
 DEV_SEED = 10
@@ -29,6 +32,20 @@ DEV_SEED = 10
 BATCH_SIZE = 8
 # Total parameters of the control net (stage plan, Mode 2 spec part 5).
 SPEC_PARAMETER_COUNT = 2_323_457
+# Seed of the stage 4 control run, and the SHA-256 of that run's untrained weights: its
+# checkpoint_000000.pt, hashed by weights_fingerprint below (each weight's name, then its
+# float32 bytes, in state_dict order). The file is in runs/, which git ignores, so the gate
+# carries the hash instead of the file.
+CONTROL_SEED = 20
+CONTROL_INITIAL_WEIGHTS_SHA256 = "25ca2e24c4132da0e52da47af791bc4b45cb9e568a384d5cac36246e264ce32d"
+# The arm shapes of stage 5 as (width, hidden_layers, history_hidden), each with its weight count
+# from spec part 16: 4D(113 + D) + 8D + (D + 2114)W + (L - 1)(W^2 + W) + W + 1.
+ARM_SHAPE_PARAMETER_COUNTS = (
+    ((256, 5, 128), 961_793),
+    ((1024, 5, 128), 6_619_649),
+    ((512, 3, 128), 1_798_145),
+    ((512, 5, 256), 2_644_481),
+)
 # Largest allowed gap between a decision's Q alone and in a batch. A different batch shape
 # changes the order of float additions, so the two differ by rounding (about 1e-8), not exactly 0.
 BATCH_TOLERANCE = 1e-6
@@ -139,7 +156,7 @@ def test_shapes_are_the_same_in_every_config():
         assert action_mask.shape == (BATCH_SIZE, max_actions)
 
         history_summary = net.summarize_history(history, history_mask)
-        assert history_summary.shape == (BATCH_SIZE, HISTORY_HIDDEN)
+        assert history_summary.shape == (BATCH_SIZE, DEFAULT_HISTORY_HIDDEN)
         assert net(*batch).shape == (BATCH_SIZE, max_actions)
 
 
@@ -148,6 +165,34 @@ def test_parameter_count_matches_the_spec():
     for parameter in QNet().parameters():
         total += parameter.numel()
     assert total == SPEC_PARAMETER_COUNT
+
+
+def weights_fingerprint(net):
+    """SHA-256 over every weight of the net: its name, then its bytes, in state_dict order."""
+    digest = hashlib.sha256()
+    for name, weights in net.state_dict().items():
+        digest.update(name.encode())
+        digest.update(weights.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def test_default_net_is_the_stage_4_control():
+    # QNet() draws its starting weights from torch's global stream. If making the sizes
+    # arguments changed a default or the order the layers are created in, these weights differ
+    # from the ones the stage 4 control run started from.
+    torch.manual_seed(CONTROL_SEED)
+    assert weights_fingerprint(QNet()) == CONTROL_INITIAL_WEIGHTS_SHA256
+
+
+def test_each_arm_shape_has_the_spec_parameter_count():
+    # An argument that is ignored, or that reaches the wrong layer, gives a different count.
+    for shape, expected_count in ARM_SHAPE_PARAMETER_COUNTS:
+        width, hidden_layers, history_hidden = shape
+        net = QNet(width=width, hidden_layers=hidden_layers, history_hidden=history_hidden)
+        total = 0
+        for parameter in net.parameters():
+            total += parameter.numel()
+        assert total == expected_count
 
 
 def test_padded_actions_cannot_change_a_real_q():

@@ -32,7 +32,14 @@ import torch
 
 from stacker.encode import encode_decision
 from stacker.game import new_hand, play_out
-from stacker.net import QNet, collate_decisions, q_loss
+from stacker.net import (
+    DEFAULT_HIDDEN_LAYERS,
+    DEFAULT_HISTORY_HIDDEN,
+    DEFAULT_MLP_WIDTH,
+    QNet,
+    collate_decisions,
+    q_loss,
+)
 
 # Cap on the length of the whole gradient in one update. DouZero's default (--max_grad_norm 40.,
 # douzero/dmc/arguments.py); decision log 2026-11-12, loop control.
@@ -49,6 +56,13 @@ LEARNING_RATE = 1e-4
 RMSPROP_ALPHA = 0.99
 RMSPROP_EPS = 1e-5
 RMSPROP_MOMENTUM = 0.0
+# The control's optimizer, by the name build_optimizer takes.
+CONTROL_OPTIMIZER = "rmsprop"
+# Adam, the optimizer arm (decision log 2026-11-22, Arms: Adam): PyTorch's defaults. How much of
+# the running averages of the gradient and of its square is kept each step, and the small number
+# added to the square root so a step never divides by zero. No weight decay.
+ADAM_BETAS = (0.9, 0.999)
+ADAM_EPS = 1e-8
 
 # M3 trains a specialist for one config: 4 players, 1 deck.
 NUM_PLAYERS = 4
@@ -248,6 +262,31 @@ def learner_step(q_net, optimizer, samples):
     return float(loss.detach()), float(gradient_norm)
 
 
+def build_optimizer(q_net, optimizer=CONTROL_OPTIMIZER, learning_rate=LEARNING_RATE):
+    """
+    Builds the optimizer a run names, over q_net's weights (spec part 17).
+    q_net: a QNet, already on the device it trains on: the optimizer keeps running averages per
+      weight and creates them where the weights are.
+    optimizer: "rmsprop" (the control) or "adam" (the optimizer arm).
+    learning_rate: the step size, for either optimizer.
+    Returns a torch optimizer. Every setting but the rate is a constant of this file.
+    Raises ValueError for any other name, so a typo cannot quietly train the control.
+    """
+    if optimizer == "rmsprop":
+        return torch.optim.RMSprop(
+            q_net.parameters(),
+            lr=learning_rate,
+            alpha=RMSPROP_ALPHA,
+            eps=RMSPROP_EPS,
+            momentum=RMSPROP_MOMENTUM,
+        )
+    if optimizer == "adam":
+        return torch.optim.Adam(
+            q_net.parameters(), lr=learning_rate, betas=ADAM_BETAS, eps=ADAM_EPS
+        )
+    raise ValueError(f'optimizer must be "rmsprop" or "adam", got {optimizer!r}')
+
+
 def hand_stream_name(seed, actor_id, hand_index):
     """
     The name of the random stream one training hand is dealt and played from.
@@ -350,6 +389,12 @@ def train(
     checkpoint_every=CHECKPOINT_EVERY_UPDATES,
     device="cpu",
     shuffle_control=False,
+    learning_rate=LEARNING_RATE,
+    epsilon=EPSILON,
+    optimizer=CONTROL_OPTIMIZER,
+    width=DEFAULT_MLP_WIDTH,
+    hidden_layers=DEFAULT_HIDDEN_LAYERS,
+    history_hidden=DEFAULT_HISTORY_HIDDEN,
 ):
     """
     Runs the training loop with actors in their own processes (spec parts 7-9 and 12).
@@ -367,6 +412,10 @@ def train(
       always play on the CPU.
     shuffle_control: True runs the label-shuffle control: every batch goes through
       shuffle_returns before its update. False (a normal run) leaves the batches alone.
+    The rest are what the exploration arms vary (spec parts 16-17); the defaults are the control.
+    learning_rate, optimizer: the step size and "rmsprop" or "adam", passed to build_optimizer.
+    epsilon: probability that an actor plays a random action on a turn with a choice.
+    width, hidden_layers, history_hidden: the net's sizes, passed to QNet for both nets.
     Returns (q_net, actor_net): the trained learner net, on device, and the shared net the
       actors played with, on the CPU, which holds the same weights.
     Must be called under `if __name__ == "__main__":` in a script: each actor process starts by
@@ -376,11 +425,11 @@ def train(
     # stream first fixes them. The net is built on the CPU whatever the device: a GPU has its
     # own random stream, and weights drawn there would differ from the CPU's for the same seed.
     torch.manual_seed(seed)
-    q_net = QNet()
+    q_net = QNet(width=width, hidden_layers=hidden_layers, history_hidden=history_hidden)
 
-    # The actors' net: the same weights as the learner's, moved to memory that every process
-    # can read. Actors get a handle to that memory, not a copy of the weights.
-    actor_net = QNet()
+    # The actors' net: the same sizes and weights as the learner's, moved to memory that every
+    # process can read. Actors get a handle to that memory, not a copy of the weights.
+    actor_net = QNet(width=width, hidden_layers=hidden_layers, history_hidden=history_hidden)
     actor_net.load_state_dict(q_net.state_dict())
     actor_net.share_memory()
 
@@ -388,13 +437,8 @@ def train(
     # The optimizer is built after the move, so the running averages it keeps per weight are
     # created on the device too.
     q_net.to(device)
-    optimizer = torch.optim.RMSprop(
-        q_net.parameters(),
-        lr=LEARNING_RATE,
-        alpha=RMSPROP_ALPHA,
-        eps=RMSPROP_EPS,
-        momentum=RMSPROP_MOMENTUM,
-    )
+    # A local name of its own: the argument `optimizer` is the name, this is the object.
+    run_optimizer = build_optimizer(q_net, optimizer, learning_rate)
 
     # The directory may exist already: the training script makes it first, to write the run's
     # config. A log in it means an earlier run, which is kept, so stop before any actor starts.
@@ -419,7 +463,7 @@ def train(
         # daemon: the actor is ended with this process, even if the cleanup below never runs.
         actor = context.Process(
             target=actor_loop,
-            args=(actor_id, seed, actor_net, sample_queue, EPSILON),
+            args=(actor_id, seed, actor_net, sample_queue, epsilon),
             daemon=True,
         )
         actor.start()
@@ -453,7 +497,7 @@ def train(
                     batch = shuffle_returns(batch, shuffle_rng)
 
                 learner_start = time.perf_counter()
-                loss, gradient_norm = learner_step(q_net, optimizer, batch)
+                loss, gradient_norm = learner_step(q_net, run_optimizer, batch)
 
                 # Equation 12: write the new weights into the shared memory, in place, so every
                 # actor's next forward pass uses them.

@@ -23,13 +23,13 @@ from torch import nn
 
 from stacker.encode import ACTION_DIM, MOVE_DIM, STATE_DIM
 
+# The control net's three sizes (decision log, 2026-11-09). They are the defaults of QNet, so
+# QNet() is the control; the exploration arms pass other values (spec part 16).
 # Size of the history summary z, the LSTM's output after the latest move.
-HISTORY_HIDDEN = 128
+DEFAULT_HISTORY_HIDDEN = 128
 # Width of every hidden MLP layer, and how many of them there are before the output layer.
-MLP_WIDTH = 512
-NUM_HIDDEN_LAYERS = 5
-# The MLP reads [history summary ; state ; action] joined end to end.
-MLP_INPUT_DIM = HISTORY_HIDDEN + STATE_DIM + ACTION_DIM
+DEFAULT_MLP_WIDTH = 512
+DEFAULT_HIDDEN_LAYERS = 5
 
 
 def collate_decisions(decisions):
@@ -79,26 +79,39 @@ class QNet(nn.Module):
     the hand if that action is played. The same weights read every config.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        width=DEFAULT_MLP_WIDTH,
+        hidden_layers=DEFAULT_HIDDEN_LAYERS,
+        history_hidden=DEFAULT_HISTORY_HIDDEN,
+    ):
         """
-        Creates the two parts and their parameters (2,323,457 in total); nothing is computed here.
-        history_lstm: reads history rows [B, H, MOVE_DIM] in order, gives [B, H, HISTORY_HIDDEN].
-        mlp: reads [..., MLP_INPUT_DIM], gives [..., 1]: NUM_HIDDEN_LAYERS layers of
-          (Linear, ReLU), MLP_WIDTH wide, then one Linear to a single number with no activation,
-          so Q can be any real value.
+        Creates the two parts and their parameters; nothing is computed here.
+        width: units in every hidden MLP layer (W in the spec).
+        hidden_layers: number of (Linear, ReLU) layers before the output layer (L).
+        history_hidden: size of the history summary z (D).
+        The defaults are the control net, 2,323,457 parameters.
+        history_lstm: reads history rows [B, H, MOVE_DIM] in order, gives [B, H, history_hidden].
+        mlp: reads [..., history_hidden + STATE_DIM + ACTION_DIM], gives [..., 1]: hidden_layers
+          layers of (Linear, ReLU), width wide, then one Linear to a single number with no
+          activation, so Q can be any real value.
         """
         super().__init__()
+        # The parts are created in a fixed order: the LSTM, then the MLP front to back. Each new
+        # layer draws its starting weights from torch's one random stream, so a different order
+        # would give the control different starting weights under the same seed.
         # batch_first: the batch is the first axis, [B, H, MOVE_DIM], as collate_decisions gives.
-        self.history_lstm = nn.LSTM(MOVE_DIM, HISTORY_HIDDEN, batch_first=True)
+        self.history_lstm = nn.LSTM(MOVE_DIM, history_hidden, batch_first=True)
 
-        # Only the first layer reads the joined input; every later layer reads the one before it.
+        # The MLP reads [history summary ; state ; action] joined end to end. Only the first
+        # layer reads the joined input; every later layer reads the one before it.
         layers = []
-        layer_input_dim = MLP_INPUT_DIM
-        for _ in range(NUM_HIDDEN_LAYERS):
-            layers.append(nn.Linear(layer_input_dim, MLP_WIDTH))
+        layer_input_dim = history_hidden + STATE_DIM + ACTION_DIM
+        for _ in range(hidden_layers):
+            layers.append(nn.Linear(layer_input_dim, width))
             layers.append(nn.ReLU())
-            layer_input_dim = MLP_WIDTH
-        layers.append(nn.Linear(MLP_WIDTH, 1))
+            layer_input_dim = width
+        layers.append(nn.Linear(width, 1))
         self.mlp = nn.Sequential(*layers)
 
     def summarize_history(self, history, history_mask):
@@ -106,7 +119,7 @@ class QNet(nn.Module):
         Summarizes each decision's recent moves as one vector z (spec part 2, equations 1-2).
         history: float32 [B, H, MOVE_DIM], oldest move first, padded at the front.
         history_mask: bool [B, H], True for real moves.
-        Returns z, float32 [B, HISTORY_HIDDEN].
+        Returns z, float32 [B, history_hidden].
         """
         # Equation 1: a padded row is multiplied by 0 and a real row by 1, so whatever a padded
         # row holds cannot reach the LSTM. The new last axis lets [B, H] scale each row's values.
@@ -115,7 +128,7 @@ class QNet(nn.Module):
         # Equation 2: the LSTM reads the rows oldest to latest, updating its memory at each one.
         # No initial state is passed, so the memory starts at zero. It steps over padded rows too,
         # so z depends on how many there are, never on their content.
-        step_outputs, _ = self.history_lstm(masked_history)  # [B, H, HISTORY_HIDDEN]
+        step_outputs, _ = self.history_lstm(masked_history)  # [B, H, history_hidden]
 
         # Padding is at the front, so the last step is always the latest real move.
         return step_outputs[:, -1, :]
@@ -131,7 +144,7 @@ class QNet(nn.Module):
         action k. A padded slot holds exactly 0, which is not a score: code that picks the best
         action must apply action_mask itself.
         """
-        history_summary = self.summarize_history(history, history_mask)  # [B, HISTORY_HIDDEN]
+        history_summary = self.summarize_history(history, history_mask)  # [B, history_hidden]
 
         # A decision has one history summary and one state, but the MLP needs them beside each
         # action. The new middle axis is stretched to K; expand reads the same memory K times
@@ -140,7 +153,7 @@ class QNet(nn.Module):
         summary_per_action = history_summary.unsqueeze(1).expand(-1, num_actions, -1)
         state_per_action = state.unsqueeze(1).expand(-1, num_actions, -1)
 
-        # Equation 3: join end to end, in the order MLP_INPUT_DIM is defined.
+        # Equation 3: join end to end, in the order the first MLP layer expects.
         joined = torch.cat([summary_per_action, state_per_action, actions], dim=-1)
 
         # Equation 4: Linear layers work on the last axis, so one call scores all B x K rows.
