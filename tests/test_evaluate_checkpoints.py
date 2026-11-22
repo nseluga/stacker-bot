@@ -11,8 +11,11 @@ function and by the script, before anything is written.
 Seeds start at 10: seeds 0-2 are kept for confirm runs.
 """
 
+import csv
+import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -145,6 +148,7 @@ def test_same_checkpoint_scores_the_same_twice(tmp_path, monkeypatch):
         GATE_DEALS,
         DEV_SEED,
         PRE_STAGE_5_CONFIG,
+        None,
     )
     first = evaluate_checkpoints.evaluate_checkpoint(task)
     second = evaluate_checkpoints.evaluate_checkpoint(task)
@@ -165,7 +169,7 @@ def test_a_1024_wide_checkpoint_loads_and_scores(tmp_path):
     torch.manual_seed(DEV_SEED)
     path = tmp_path / "checkpoint_000000.pt"
     torch.save(QNet(width=1024).state_dict(), path)
-    task = (str(path), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, DEV_SEED, WIDE_CONFIG)
+    task = (str(path), FIELD_NAME, NUM_PLAYERS, GATE_DEALS, DEV_SEED, WIDE_CONFIG, None)
     result = evaluate_checkpoints.evaluate_checkpoint(task)
     assert len(result["differences"]) == GATE_DEALS
 
@@ -195,10 +199,79 @@ def test_decisions_are_encoded_at_the_runs_window(tmp_path, monkeypatch):
         GATE_DEALS,
         DEV_SEED,
         window_zero_config,
+        None,
     )
     evaluate_checkpoints.evaluate_checkpoint(task)
     assert len(history_rows_seen) > 0
     assert set(history_rows_seen) == {0}
+
+
+def test_field_net_is_built_from_its_own_config(tmp_path):
+    # catches: the field net built from the test run's config (a 1024-wide file in a 512 net).
+    torch.manual_seed(DEV_SEED)
+    wide_path = tmp_path / "checkpoint_wide.pt"
+    torch.save(QNet(width=1024).state_dict(), wide_path)
+    task = (
+        str(save_seeded_checkpoint(tmp_path)),
+        "net",
+        NUM_PLAYERS,
+        GATE_DEALS,
+        DEV_SEED,
+        PRE_STAGE_5_CONFIG,
+        (str(wide_path), WIDE_CONFIG),
+    )
+    result = evaluate_checkpoints.evaluate_checkpoint(task)
+    assert len(result["differences"]) == GATE_DEALS
+
+
+def test_script_scores_a_net_against_itself_as_exactly_zero(tmp_path):
+    # catches: --field-run parsed and then ignored (the field stays an agent, so not 0), or the
+    # result written over the run's curve against agents.
+    # Identical deterministic nets in every seat play the same game in every rotation, so the
+    # test seat covers every seat of one game and each paired difference is exactly 0.
+    run_name = "eval-gate-self-play"
+    run_dir = evaluate_checkpoints.RUNS_DIR / run_name
+    shutil.rmtree(run_dir, ignore_errors=True)
+    run_dir.mkdir(parents=True)
+    torch.save(seeded_net().state_dict(), run_dir / "checkpoint_000000.pt")
+    run_config = {
+        "players": NUM_PLAYERS,
+        "samples_per_update": 1,
+        "git_commit": "gate",
+        "uncommitted_changes": False,
+    }
+    with open(run_dir / "config.json", "w") as file:
+        json.dump(run_config, file)
+
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    finished = subprocess.run(
+        [
+            sys.executable, str(REPO_ROOT / "scripts" / "evaluate_checkpoints.py"),
+            "--run", run_name, "--field-run", run_name, "--field-checkpoint", "0",
+            "--deals", str(GATE_DEALS), "--seed", str(DEV_SEED), "--workers", "1",
+        ],
+        cwd=REPO_ROOT, env=environment, capture_output=True, text=True,
+    )
+
+    # Read what the asserts need, then remove the run and its results.
+    result_paths = sorted(evaluate_checkpoints.RESULTS_DIR.glob(f"{run_name}_*"))
+    differences = []
+    for path in result_paths:
+        if path.name.endswith("_deals.csv"):
+            with open(path) as file:
+                for row in csv.DictReader(file):
+                    differences.append(float(row["difference"]))
+    result_names = [path.name for path in result_paths]
+    for path in result_paths:
+        path.unlink()
+    shutil.rmtree(run_dir)
+
+    assert finished.returncode == 0, finished.stderr
+    for name in result_names:
+        assert f"_vs_{run_name}_ckpt0" in name
+    assert len(differences) == GATE_DEALS
+    assert differences == [0.0] * GATE_DEALS
 
 
 def test_scoring_never_loads_the_sealed_deals(tmp_path, monkeypatch):
@@ -216,6 +289,7 @@ def test_scoring_never_loads_the_sealed_deals(tmp_path, monkeypatch):
         GATE_DEALS,
         DEV_SEED,
         PRE_STAGE_5_CONFIG,
+        None,
     )
     result = evaluate_checkpoints.evaluate_checkpoint(task)
     assert len(result["differences"]) == GATE_DEALS
@@ -231,6 +305,7 @@ def test_function_refuses_a_test_seed(tmp_path):
         GATE_DEALS,
         REFUSED_SEED,
         PRE_STAGE_5_CONFIG,
+        None,
     )
     with pytest.raises(ValueError, match="dev runs use seeds"):
         evaluate_checkpoints.evaluate_checkpoint(task)

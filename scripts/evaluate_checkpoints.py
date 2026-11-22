@@ -118,9 +118,12 @@ def checkpoint_agent(net, history_window, observation, actions, rng):
 def evaluate_checkpoint(task):
     """
     Scores one checkpoint against one field agent on dev deals. Runs in a worker process.
-    task: (checkpoint_path, field_name, num_players, num_deals, seed, run_config), one tuple
-    because a process pool hands a worker one argument. field_name is a key of AGENTS; seed is
+    task: (checkpoint_path, field_name, num_players, num_deals, seed, run_config,
+    field_checkpoint), one tuple because a process pool hands a worker one argument. seed is
     ≥ 10; run_config is the run's config.json, which names the net's sizes and window.
+    field_checkpoint: None, and field_name is a key of AGENTS; or (path, config) of a second
+    checkpoint that plays every field seat (net against net), and field_name is its label.
+    Each net is built from its own run's config, so the two may differ in size and window.
     Returns a dict: checkpoint (file name), field, mean, ci_low, ci_high (95% bootstrap CI of
     the mean), standard_deviation, seconds (play time), differences (list of num_deals floats,
     the per-deal paired differences in deal order). Positive means the checkpoint is stronger.
@@ -129,7 +132,7 @@ def evaluate_checkpoint(task):
     rng is named by seed, deal and rotation, never by the checkpoint. So two checkpoints'
     differences can be compared deal by deal.
     """
-    checkpoint_path, field_name, num_players, num_deals, seed, run_config = task
+    checkpoint_path, field_name, num_players, num_deals, seed, run_config, field_checkpoint = task
 
     # Many workers run at once, one per core. Torch's default would give each of them a thread
     # per core, all waiting on each other.
@@ -137,6 +140,12 @@ def evaluate_checkpoint(task):
 
     net, history_window = load_checkpoint_net(checkpoint_path, run_config)
     test_agent = functools.partial(checkpoint_agent, net, history_window)
+    if field_checkpoint is None:
+        field_agent = AGENTS[field_name]
+    else:
+        field_path, field_config = field_checkpoint
+        field_net, field_window = load_checkpoint_net(field_path, field_config)
+        field_agent = functools.partial(checkpoint_agent, field_net, field_window)
 
     # False: dev deals. It is fixed here, so no argument can reach the sealed set, and
     # select_deals raises on a seed below 10.
@@ -144,7 +153,7 @@ def evaluate_checkpoint(task):
 
     start = time.perf_counter()
     differences = paired_differences(
-        deck_orders, num_players, test_agent, AGENTS[field_name], TEST_SEATS, seed
+        deck_orders, num_players, test_agent, field_agent, TEST_SEATS, seed
     )
     seconds = time.perf_counter() - start
 
@@ -172,7 +181,10 @@ def main():
     """Parses the command line, scores the run's checkpoints, and writes the three files."""
     parser = argparse.ArgumentParser(description="Score a run's checkpoints on dev deals.")
     parser.add_argument("--run", required=True, help="run name under runs/specialist_explore/")
-    parser.add_argument("--fields", default="random,greedy", help="field agents, comma-separated")
+    parser.add_argument("--fields", help="field agents, comma-separated; default random,greedy")
+    # Net against net: a second run's checkpoint plays every field seat. Both flags or neither.
+    parser.add_argument("--field-run", help="run whose checkpoint is the field")
+    parser.add_argument("--field-checkpoint", type=int, help="that checkpoint's updates done")
     parser.add_argument("--deals", type=int, default=1000, help="deals per (checkpoint, field)")
     parser.add_argument("--seed", type=int, default=22, help=f"dev seed, ≥ {DEV_SEED_MIN}")
     parser.add_argument("--checkpoints", help="updates-done numbers, e.g. 0,3125; default all")
@@ -183,10 +195,29 @@ def main():
     if args.seed < DEV_SEED_MIN:
         raise SystemExit(f"dev seeds are ≥ {DEV_SEED_MIN}; 0–2 are test seeds, got {args.seed}")
 
-    field_names = args.fields.split(",")
-    for field_name in field_names:
-        if field_name not in AGENTS:
-            raise SystemExit(f"unknown field {field_name!r}; choose from {sorted(AGENTS)}")
+    # A net field is its own evaluation: mixing it with field agents would put two kinds of
+    # result in one file.
+    if (args.field_run is None) != (args.field_checkpoint is None):
+        raise SystemExit("--field-run and --field-checkpoint go together")
+    field_checkpoint = None
+    if args.field_run is not None:
+        if args.fields is not None:
+            raise SystemExit("--fields and --field-run are separate evaluations; give one")
+        field_dir = RUNS_DIR / args.field_run
+        field_path = field_dir / f"checkpoint_{args.field_checkpoint:06d}.pt"
+        if not field_path.exists():
+            raise SystemExit(f"{field_path} not found")
+        with open(field_dir / "config.json") as file:
+            field_config = json.load(file)
+        field_checkpoint = (str(field_path), field_config)
+        field_names = ["net"]
+    elif args.fields is None:
+        field_names = ["random", "greedy"]
+    else:
+        field_names = args.fields.split(",")
+        for field_name in field_names:
+            if field_name not in AGENTS:
+                raise SystemExit(f"unknown field {field_name!r}; choose from {sorted(AGENTS)}")
 
     run_dir = RUNS_DIR / args.run
     config_path = run_dir / "config.json"
@@ -220,7 +251,15 @@ def main():
     for path in updates_by_path:
         for field_name in field_names:
             tasks.append(
-                (str(path), field_name, run_config["players"], args.deals, args.seed, run_config)
+                (
+                    str(path),
+                    field_name,
+                    run_config["players"],
+                    args.deals,
+                    args.seed,
+                    run_config,
+                    field_checkpoint,
+                )
             )
 
     # sched_getaffinity (Linux only) counts the cores this process may use, which on a shared
@@ -242,6 +281,9 @@ def main():
     total_seconds = time.perf_counter() - start
 
     name = f"{args.run}_eval_dev_n{args.deals}_seed{args.seed}"
+    # A net-against-net result gets its own name, so it cannot replace the curve against agents.
+    if field_checkpoint is not None:
+        name += f"_vs_{args.field_run}_ckpt{args.field_checkpoint}"
     # A partial curve gets its own name, so it cannot replace the full one.
     if args.checkpoints is not None:
         chosen_numbers = []
@@ -291,6 +333,10 @@ def main():
         "run_git_commit": run_config["git_commit"],
         "run_uncommitted_changes": run_config["uncommitted_changes"],
     }
+    if field_checkpoint is not None:
+        summary["field_run"] = args.field_run
+        summary["field_checkpoint"] = args.field_checkpoint
+        summary["field_run_git_commit"] = field_checkpoint[1]["git_commit"]
     with open(RESULTS_DIR / (name + ".json"), "w") as file:
         json.dump(summary, file, indent=2)
     print(f"{name}: {len(tasks)} evaluations in {total_seconds:.1f} s on {workers} workers")

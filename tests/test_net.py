@@ -7,7 +7,8 @@ of legal actions and different history lengths, which is what padding and maskin
 Batch: collated rows equal the encode_decision rows they came from; padding is zero and masked.
 Shapes: the same in all six configs; the parameter count is the spec's.
 Sizes (stage 5, spec part 16): QNet() is still the control, weight for weight; each arm shape
-has the weight count the spec's formula gives.
+has the weight count the spec's formula gives. The shape, masking, gradient and overfit gates run
+on the control and on every arm shape (stage 5 piece 9a).
 Masking: padded action rows and masked history rows cannot change a real Q.
 Batch independence: a decision's Q is the same alone and inside a batch, within rounding.
 Loss: an untrained net starts near mean(return^2); only the taken action's Q gets gradient; every
@@ -19,12 +20,20 @@ Training: the same seed gives the same losses; eval passes repeat exactly; the n
 import hashlib
 import random
 
+import pytest
 import torch
 
 from stacker.cards import CONFIGS
 from stacker.encode import ACTION_DIM, HISTORY_WINDOW, MOVE_DIM, STATE_DIM, encode_decision
 from stacker.game import new_hand, play_out
-from stacker.net import DEFAULT_HISTORY_HIDDEN, QNet, collate_decisions, q_loss
+from stacker.net import (
+    DEFAULT_HIDDEN_LAYERS,
+    DEFAULT_HISTORY_HIDDEN,
+    DEFAULT_MLP_WIDTH,
+    QNet,
+    collate_decisions,
+    q_loss,
+)
 
 # Dev seed for dealing hands and creating nets (rule 2: seeds >= 10 outside confirm runs).
 DEV_SEED = 10
@@ -46,6 +55,12 @@ ARM_SHAPE_PARAMETER_COUNTS = (
     ((512, 3, 128), 1_798_145),
     ((512, 5, 256), 2_644_481),
 )
+# Every net shape the gates run on: the control first, then the arm shapes. A size argument that
+# reaches one layer but not the next only shows at a shape where that size differs.
+CONTROL_SHAPE = (DEFAULT_MLP_WIDTH, DEFAULT_HIDDEN_LAYERS, DEFAULT_HISTORY_HIDDEN)
+NET_SHAPES = [CONTROL_SHAPE]
+for arm_shape, _ in ARM_SHAPE_PARAMETER_COUNTS:
+    NET_SHAPES.append(arm_shape)
 # Largest allowed gap between a decision's Q alone and in a batch. A different batch shape
 # changes the order of float additions, so the two differ by rounding (about 1e-8), not exactly 0.
 BATCH_TOLERANCE = 1e-6
@@ -94,19 +109,23 @@ def fixed_batch():
     return decisions, batch, taken_index, returns
 
 
-def seeded_net():
-    """A QNet whose starting weights are fixed by DEV_SEED."""
-    torch.manual_seed(DEV_SEED)
-    return QNet()
-
-
-def training_losses(steps):
+def seeded_net(shape=CONTROL_SHAPE):
     """
-    Trains a fresh seeded net on the fixed batch for `steps` steps.
+    A QNet whose starting weights are fixed by DEV_SEED.
+    shape: (width, hidden_layers, history_hidden); the control by default.
+    """
+    width, hidden_layers, history_hidden = shape
+    torch.manual_seed(DEV_SEED)
+    return QNet(width=width, hidden_layers=hidden_layers, history_hidden=history_hidden)
+
+
+def training_losses(steps, shape=CONTROL_SHAPE):
+    """
+    Trains a fresh seeded net of the given shape on the fixed batch for `steps` steps.
     Returns the list of loss values (floats), one per step, each measured before its update.
     """
     _, batch, taken_index, returns = fixed_batch()
-    net = seeded_net()
+    net = seeded_net(shape)
     optimizer = torch.optim.Adam(net.parameters(), lr=OVERFIT_LEARNING_RATE)
     losses = []
     for _ in range(steps):
@@ -139,8 +158,11 @@ def test_collated_rows_equal_their_encoded_rows():
     assert not action_mask.all()
 
 
-def test_shapes_are_the_same_in_every_config():
-    net = seeded_net()
+@pytest.mark.parametrize("shape", NET_SHAPES)
+def test_shapes_are_the_same_in_every_config(shape):
+    # catches (arm shapes): a summary size that the LSTM uses but the MLP's input does not.
+    net = seeded_net(shape)
+    history_hidden = shape[2]
     for num_players in CONFIGS:
         decisions = real_decisions(num_players)[:BATCH_SIZE]
         max_actions = 0
@@ -156,7 +178,7 @@ def test_shapes_are_the_same_in_every_config():
         assert action_mask.shape == (BATCH_SIZE, max_actions)
 
         history_summary = net.summarize_history(history, history_mask)
-        assert history_summary.shape == (BATCH_SIZE, DEFAULT_HISTORY_HIDDEN)
+        assert history_summary.shape == (BATCH_SIZE, history_hidden)
         assert net(*batch).shape == (BATCH_SIZE, max_actions)
 
 
@@ -195,10 +217,11 @@ def test_each_arm_shape_has_the_spec_parameter_count():
         assert total == expected_count
 
 
-def test_padded_actions_cannot_change_a_real_q():
+@pytest.mark.parametrize("shape", NET_SHAPES)
+def test_padded_actions_cannot_change_a_real_q(shape):
     _, batch, _, _ = fixed_batch()
     state, history, history_mask, actions, action_mask = batch
-    net = seeded_net()
+    net = seeded_net(shape)
 
     with torch.no_grad():
         q_before = net(*batch)
@@ -217,10 +240,11 @@ def test_padded_actions_cannot_change_a_real_q():
         assert not torch.equal(q_before, q_real_changed)
 
 
-def test_masked_history_cannot_change_q():
+@pytest.mark.parametrize("shape", NET_SHAPES)
+def test_masked_history_cannot_change_q(shape):
     _, batch, _, _ = fixed_batch()
     state, history, history_mask, actions, action_mask = batch
-    net = seeded_net()
+    net = seeded_net(shape)
     # Early decisions have padded history rows, so there is something to corrupt.
     assert not history_mask.all()
 
@@ -299,9 +323,11 @@ def test_only_the_taken_q_gets_gradient():
     assert (q_values.grad[~taken_cells] == 0).all()
 
 
-def test_every_parameter_gets_gradient():
+@pytest.mark.parametrize("shape", NET_SHAPES)
+def test_every_parameter_gets_gradient(shape):
+    # catches (depth 3): layers built but skipped by the forward pass.
     _, batch, taken_index, returns = fixed_batch()
-    net = seeded_net()
+    net = seeded_net(shape)
     q_loss(net(*batch), taken_index, returns).backward()
 
     # A parameter with no gradient is cut off from the loss and would never train.
@@ -329,8 +355,9 @@ def test_eval_passes_are_bit_identical():
         assert torch.equal(q_first, net(*batch))
 
 
-def test_net_can_memorize_eight_decisions():
+@pytest.mark.parametrize("shape", NET_SHAPES)
+def test_net_can_memorize_eight_decisions(shape):
     # A net that cannot drive the loss to about 0 on 8 fixed decisions has a broken path
     # somewhere between its inputs, its output and the loss.
-    losses = training_losses(OVERFIT_STEPS)
+    losses = training_losses(OVERFIT_STEPS, shape)
     assert losses[-1] < OVERFIT_LOSS_CEILING

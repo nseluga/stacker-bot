@@ -1,6 +1,7 @@
 """
-Mutation check of the DMC loop's and the checkpoint evaluation's gates (stage plan
-specialist_explore, stage 4 pieces 2 and 9).
+Mutation check of the DMC loop's, the checkpoint evaluation's and the stage 5 arms' gates
+(stage plan specialist_explore, stage 4 pieces 2 and 9; stage 5 piece 9b: net sizes, run
+settings, net against net, the arm rule and the arm plots).
 
 A gate is only worth trusting if it goes red when the code is wrong. This script plants one
 known bug at a time in a copy of the code, runs the gate files against the copy, and records
@@ -12,10 +13,11 @@ Some bugs only show on one kind of machine. A batch left on the CPU is harmless 
 on the CPU too, so the device bugs are planted only where there is a CUDA GPU (teapot); the
 "no GPU" refusal only where there is none (the laptop). A full record needs a run on each.
 
-Run from the repo root (about six minutes):
+Run from the repo root (about half an hour: each of ~40 runs takes ~40 s):
     PYTHONPATH=src .venv/bin/python scripts/mutation_check.py
 Output: a table on screen, and under results/specialist_explore/ the file
-mutation_check_dmc.json (machine without a GPU) or mutation_check_dmc_cuda.json (with one).
+mutation_check_arms.json (machine without a GPU) or mutation_check_arms_cuda.json (with one).
+Stage 4's record is mutation_check_dmc*.json, from that stage's commit; it is not overwritten.
 """
 
 import json
@@ -33,12 +35,24 @@ from evaluate_agents import REPO_ROOT, git_state
 COPIED_DIRECTORIES = ("src", "tests", "scripts")
 COPIED_FILES = ("pyproject.toml",)
 # The gates under test, relative to the copy's root.
-GATES_FILES = ("tests/test_dmc.py", "tests/test_evaluate_checkpoints.py")
-# Longest one gate run may take before it is recorded as hung (a normal run is under 20 s).
+GATES_FILES = (
+    "tests/test_dmc.py",
+    "tests/test_evaluate_checkpoints.py",
+    "tests/test_net.py",
+    "tests/test_encode.py",
+    "tests/test_arms.py",
+    "tests/test_plot_arms.py",
+)
+# Longest one gate run may take before it is recorded as hung (a normal run is about 40 s).
 GATES_TIMEOUT_SECONDS = 600
 RESULTS_DIR = REPO_ROOT / "results" / "specialist_explore"
+# The result file's name without its ending; "_cuda" is added on a machine with a GPU.
+RESULTS_STEM = "mutation_check_arms"
 
 DMC = "src/stacker/dmc.py"
+NET = "src/stacker/net.py"
+ARMS = "src/stacker/arms.py"
+PLOT_ARMS_SCRIPT = "scripts/plot_arms.py"
 TRAIN_SCRIPT = "scripts/train_dmc.py"
 EVAL_SCRIPT = "scripts/evaluate_checkpoints.py"
 # The line of shuffle_returns that takes one sample apart. A planted bug adds a line after it.
@@ -204,6 +218,81 @@ MUTATIONS = (
         "    if args.seed < DEV_SEED_MIN:\n",
         "    if False:\n",
     ),
+    # Stage 5 (piece 9b): one bug per new code path of pieces 1-8.
+    (
+        "width argument ignored",
+        NET,
+        "        super().__init__()\n",
+        "        super().__init__()\n        width = DEFAULT_MLP_WIDTH\n",
+    ),
+    (
+        "depth argument ignored",
+        NET,
+        "for _ in range(hidden_layers):",
+        "for _ in range(DEFAULT_HIDDEN_LAYERS):",
+    ),
+    (
+        "summary size not passed to the MLP's input",
+        NET,
+        "layer_input_dim = history_hidden + STATE_DIM + ACTION_DIM",
+        "layer_input_dim = DEFAULT_HISTORY_HIDDEN + STATE_DIM + ACTION_DIM",
+    ),
+    (
+        "actors encode at the fixed window, not the run's",
+        DMC,
+        "self_play_hand(state, actor_net, epsilon, hand_rng, history_window)",
+        "self_play_hand(state, actor_net, epsilon, hand_rng)",
+    ),
+    (
+        "optimizer name ignored",
+        DMC,
+        '    if optimizer == "rmsprop":\n',
+        "    if True:\n",
+    ),
+    (
+        "learning rate ignored",
+        DMC,
+        "            lr=learning_rate,\n            alpha=RMSPROP_ALPHA,",
+        "            lr=LEARNING_RATE,\n            alpha=RMSPROP_ALPHA,",
+    ),
+    (
+        "arm's settings not checked against its base run",
+        TRAIN_SCRIPT,
+        "        if config.get(key) != base_config.get(key):\n",
+        "        if False:\n",
+    ),
+    (
+        "checkpoint net built with the control sizes, not its run's",
+        EVAL_SCRIPT,
+        '    net = QNet(\n        width=net_config["width"],\n'
+        '        hidden_layers=net_config["hidden_layers"],\n'
+        '        history_hidden=net_config["history_hidden"],\n    )',
+        "    net = QNet()",
+    ),
+    (
+        "field net built from the tested run's config",
+        EVAL_SCRIPT,
+        "load_checkpoint_net(field_path, field_config)",
+        "load_checkpoint_net(field_path, run_config)",
+    ),
+    (
+        "arm rule drops 'above every control seed'",
+        ARMS,
+        "if ci_low > 0 and arm_end > max(control_ends):",
+        "if ci_low > 0:",
+    ),
+    (
+        "arm rule's loses test has the wrong sign",
+        ARMS,
+        "elif ci_high < 0 and arm_end < min(control_ends):",
+        "elif ci_high > 0 and arm_end < min(control_ends):",
+    ),
+    (
+        "long control seed read at the end of its file, not at arm length",
+        PLOT_ARMS_SCRIPT,
+        '        if row["checkpoint"] <= arm_length:\n            checkpoints.append',
+        "        if True:\n            checkpoints.append",
+    ),
 )
 
 # Planted only where there is a CUDA GPU: with the net on the CPU these change nothing.
@@ -261,11 +350,11 @@ def main():
     if has_cuda:
         planted_here = CUDA_MUTATIONS
         left_out = NO_CUDA_MUTATIONS
-        results_path = RESULTS_DIR / "mutation_check_dmc_cuda.json"
+        results_path = RESULTS_DIR / f"{RESULTS_STEM}_cuda.json"
     else:
         planted_here = NO_CUDA_MUTATIONS
         left_out = CUDA_MUTATIONS
-        results_path = RESULTS_DIR / "mutation_check_dmc.json"
+        results_path = RESULTS_DIR / f"{RESULTS_STEM}.json"
     for mutation in planted_here:
         runs.append(mutation)
     not_planted = []
