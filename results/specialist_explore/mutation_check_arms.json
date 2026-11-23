@@ -1,0 +1,290 @@
+{
+  "gates_files": [
+    "tests/test_dmc.py",
+    "tests/test_evaluate_checkpoints.py",
+    "tests/test_net.py",
+    "tests/test_encode.py",
+    "tests/test_arms.py",
+    "tests/test_plot_arms.py"
+  ],
+  "commit": "45309692381de4bbdae6e9f508839b99bb4d7b2f",
+  "uncommitted_changes": false,
+  "cuda": false,
+  "rows": [
+    {
+      "mutation": "baseline (no bug)",
+      "failed_gates": []
+    },
+    {
+      "mutation": "return of the next seat",
+      "failed_gates": [
+        "test_scripted_hand_gives_each_decision_its_own_seats_score",
+        "test_samples_match_the_hand_that_was_played"
+      ]
+    },
+    {
+      "mutation": "stored action is row 0, not the one played",
+      "failed_gates": [
+        "test_samples_match_the_hand_that_was_played"
+      ]
+    },
+    {
+      "mutation": "forced turn calls the net",
+      "failed_gates": [
+        "test_forced_turn_skips_the_net",
+        "test_scripted_hand_gives_each_decision_its_own_seats_score",
+        "test_agent_plays_the_highest_scoring_action"
+      ]
+    },
+    {
+      "mutation": "greedy pick takes the lowest Q",
+      "failed_gates": [
+        "test_epsilon_zero_picks_the_highest_q",
+        "test_agent_plays_the_highest_scoring_action"
+      ]
+    },
+    {
+      "mutation": "returns shaped [B, 1]",
+      "failed_gates": [
+        "test_collate_samples_shapes",
+        "test_loss_falls_on_a_fixed_batch"
+      ]
+    },
+    {
+      "mutation": "no gradient clip",
+      "failed_gates": [
+        "test_large_gradient_is_clipped_to_the_cap"
+      ]
+    },
+    {
+      "mutation": "old gradients not cleared",
+      "failed_gates": [
+        "test_old_gradients_are_cleared_before_an_update"
+      ]
+    },
+    {
+      "mutation": "one-process loop reuses its samples",
+      "failed_gates": [
+        "test_one_process_loop_trains_on_each_sample_once"
+      ]
+    },
+    {
+      "mutation": "actor loop reuses its samples",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "weights never copied to the actors",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "every actor plays the same stream",
+      "failed_gates": [
+        "test_actor_plays_the_hands_its_stream_names"
+      ]
+    },
+    {
+      "mutation": "shuffle moves the actions with the returns",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns"
+      ]
+    },
+    {
+      "mutation": "shuffle leaves the returns in order",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns",
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "shuffle draws returns with repeats",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns",
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "shuffle changes the batch it was handed",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns",
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "shuffle flag ignored",
+      "failed_gates": [
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "shuffle result thrown away",
+      "failed_gates": [
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "return variance divides by B - 1",
+      "failed_gates": [
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "samples_total counts updates",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "train starts from another seed",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "checkpoint 0 is not the starting net",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner",
+        "test_train_script_passes_its_arm_flags_on"
+      ]
+    },
+    {
+      "mutation": "evaluation makes random moves",
+      "failed_gates": [
+        "test_agent_plays_the_highest_scoring_action",
+        "test_script_scores_a_net_against_itself_as_exactly_zero"
+      ]
+    },
+    {
+      "mutation": "checkpoint net left in training mode",
+      "failed_gates": [
+        "test_loaded_checkpoint_is_ready_to_play"
+      ]
+    },
+    {
+      "mutation": "bootstrap rng not named by the seed",
+      "failed_gates": [
+        "test_same_checkpoint_scores_the_same_twice"
+      ]
+    },
+    {
+      "mutation": "evaluation asks for the sealed deals",
+      "failed_gates": [
+        "test_same_checkpoint_scores_the_same_twice",
+        "test_a_1024_wide_checkpoint_loads_and_scores",
+        "test_decisions_are_encoded_at_the_runs_window",
+        "test_field_net_is_built_from_its_own_config",
+        "test_script_scores_a_net_against_itself_as_exactly_zero",
+        "test_scoring_never_loads_the_sealed_deals",
+        "test_function_refuses_a_test_seed"
+      ]
+    },
+    {
+      "mutation": "eval script accepts a test seed",
+      "failed_gates": [
+        "test_script_refuses_a_test_seed"
+      ]
+    },
+    {
+      "mutation": "width argument ignored",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on",
+        "test_train_script_passes_its_arm_flags_on",
+        "test_each_arm_shape_has_the_spec_parameter_count"
+      ]
+    },
+    {
+      "mutation": "depth argument ignored",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on",
+        "test_train_script_passes_its_arm_flags_on",
+        "test_each_arm_shape_has_the_spec_parameter_count"
+      ]
+    },
+    {
+      "mutation": "summary size not passed to the MLP's input",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on",
+        "test_train_script_passes_its_arm_flags_on",
+        "test_shapes_are_the_same_in_every_config[shape4]",
+        "test_each_arm_shape_has_the_spec_parameter_count",
+        "test_padded_actions_cannot_change_a_real_q[shape4]",
+        "test_masked_history_cannot_change_q[shape4]",
+        "test_every_parameter_gets_gradient[shape4]",
+        "test_net_can_memorize_eight_decisions[shape4]"
+      ]
+    },
+    {
+      "mutation": "actors encode at the fixed window, not the run's",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "optimizer name ignored",
+      "failed_gates": [
+        "test_optimizer_is_built_as_named",
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "learning rate ignored",
+      "failed_gates": [
+        "test_optimizer_is_built_as_named"
+      ]
+    },
+    {
+      "mutation": "arm's settings not checked against its base run",
+      "failed_gates": [
+        "test_arm_config_may_differ_from_its_base_only_where_named"
+      ]
+    },
+    {
+      "mutation": "checkpoint net built with the control sizes, not its run's",
+      "failed_gates": [
+        "test_a_1024_wide_checkpoint_loads_and_scores",
+        "test_field_net_is_built_from_its_own_config"
+      ]
+    },
+    {
+      "mutation": "field net built from the tested run's config",
+      "failed_gates": [
+        "test_field_net_is_built_from_its_own_config"
+      ]
+    },
+    {
+      "mutation": "arm rule drops 'above every control seed'",
+      "failed_gates": [
+        "test_verdict_known_answers"
+      ]
+    },
+    {
+      "mutation": "arm rule's loses test has the wrong sign",
+      "failed_gates": [
+        "test_verdict_known_answers",
+        "test_labels_read_the_control_at_arm_length_and_all_six_plots_are_written"
+      ]
+    },
+    {
+      "mutation": "long control seed read at the end of its file, not at arm length",
+      "failed_gates": [
+        "test_labels_read_the_control_at_arm_length_and_all_six_plots_are_written"
+      ]
+    },
+    {
+      "mutation": "train script accepts cuda with no GPU",
+      "failed_gates": [
+        "test_train_script_refuses_cuda_without_a_gpu"
+      ]
+    }
+  ],
+  "missed": [],
+  "not_planted": [
+    "net inputs not moved to the device",
+    "returns not moved to the device",
+    "learner never moved to the device",
+    "checkpoints saved from the learner's net"
+  ]
+}
