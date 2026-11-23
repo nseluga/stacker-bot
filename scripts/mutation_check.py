@@ -1,7 +1,8 @@
 """
 Mutation check of the DMC loop's, the checkpoint evaluation's and the stage 5 arms' gates
 (stage plan specialist_explore, stage 4 pieces 2 and 9; stage 5 piece 9b: net sizes, run
-settings, net against net, the arm rule and the arm plots).
+settings, net against net, the arm rule and the arm plots; actor-throughput piece 1b: the
+round-trip probe).
 
 A gate is only worth trusting if it goes red when the code is wrong. This script plants one
 known bug at a time in a copy of the code, runs the gate files against the copy, and records
@@ -52,6 +53,7 @@ GATES_FILES = (
     "tests/test_encode.py",
     "tests/test_arms.py",
     "tests/test_plot_arms.py",
+    "tests/test_round_trip_probe.py",
 )
 # Longest one gate run may take before it is recorded as hung (a normal run is about 40 s).
 GATES_TIMEOUT_SECONDS = 600
@@ -64,6 +66,7 @@ NET = "src/stacker/net.py"
 ARMS = "src/stacker/arms.py"
 PLOT_ARMS_SCRIPT = "scripts/plot_arms.py"
 TRAIN_SCRIPT = "scripts/train_dmc.py"
+ROUND_TRIP_SCRIPT = "scripts/round_trip_probe.py"
 EVAL_SCRIPT = "scripts/evaluate_checkpoints.py"
 # The line of shuffle_returns that takes one sample apart. A planted bug adds a line after it.
 SHUFFLE_UNPACK = "        state_vector, history, history_mask, taken_action, _ = samples[index]\n"
@@ -302,6 +305,24 @@ MUTATIONS = (
         PLOT_ARMS_SCRIPT,
         '        if row["checkpoint"] <= arm_length:\n            checkpoints.append',
         "        if True:\n            checkpoints.append",
+    ),
+    (
+        "round-trip server replies to actor 0 always",
+        ROUND_TRIP_SCRIPT,
+        "reply_queues[actor_id].put((slot, request_id, answers[row]))",
+        "reply_queues[0].put((slot, request_id, answers[row]))",
+    ),
+    (
+        "round-trip server reverses the answers in a batch",
+        ROUND_TRIP_SCRIPT,
+        "reply_queues[actor_id].put((slot, request_id, answers[row]))",
+        "reply_queues[actor_id].put((slot, request_id, answers[len(requests) - 1 - row]))",
+    ),
+    (
+        "run speedup cap not shrunk by the learner's slowdown",
+        ROUND_TRIP_SCRIPT,
+        "cap = learner_cap / learner_slowdown",
+        "cap = learner_cap",
     ),
 )
 
