@@ -1,0 +1,86 @@
+{
+  "players": 4,
+  "seed": 14,
+  "source": "dev",
+  "machine": "teapot",
+  "cuda": true,
+  "split_seconds": 60.0,
+  "batch_seconds": 30.0,
+  "split": {
+    "wall_seconds": 60.001081908121705,
+    "encode_seconds": 7.684532870538533,
+    "choose_seconds": 49.04675275925547,
+    "forward_seconds": 46.980821780860424,
+    "engine_and_other_seconds": 3.2697962783277035,
+    "decisions": 84760,
+    "choice_turns": 54829,
+    "hands": 1221,
+    "mean_choice_actions": 5.946287548560068
+  },
+  "split_choose_seconds_per_choice_turn": 0.000894540348342218,
+  "learner_log": "/teapot/cs152/individual/nseluga/stacker-bot/runs/specialist_explore/4p1d_dmc_teapot_a24_u18750_seed20/log.jsonl",
+  "learner_cap": 3.562,
+  "rows": [
+    {
+      "device": "cpu",
+      "batch_size": 1,
+      "decisions_per_second": 1132.4,
+      "calls": 33972,
+      "actor_speedup": 1.011,
+      "run_speedup": 1.011
+    },
+    {
+      "device": "cpu",
+      "batch_size": 8,
+      "decisions_per_second": 1453.8,
+      "calls": 5453,
+      "actor_speedup": 1.233,
+      "run_speedup": 1.233
+    },
+    {
+      "device": "cpu",
+      "batch_size": 32,
+      "decisions_per_second": 973.0,
+      "calls": 913,
+      "actor_speedup": 0.891,
+      "run_speedup": 0.891
+    },
+    {
+      "device": "cpu",
+      "batch_size": 128,
+      "decisions_per_second": 634.2,
+      "calls": 149,
+      "actor_speedup": 0.616,
+      "run_speedup": 0.616
+    },
+    {
+      "device": "cuda",
+      "batch_size": 32,
+      "decisions_per_second": 41930.0,
+      "calls": 39310,
+      "actor_speedup": 4.893,
+      "run_speedup": 3.562
+    },
+    {
+      "device": "cuda",
+      "batch_size": 256,
+      "decisions_per_second": 75232.7,
+      "calls": 8817,
+      "actor_speedup": 5.136,
+      "run_speedup": 3.562
+    },
+    {
+      "device": "cuda",
+      "batch_size": 1024,
+      "decisions_per_second": 56133.1,
+      "calls": 1645,
+      "actor_speedup": 5.029,
+      "run_speedup": 3.562
+    }
+  ],
+  "best_run_speedup": 3.562,
+  "build_threshold": 1.5,
+  "verdict": "build",
+  "git_commit": "6d3ae10bdb55288d8b19b9df0e03e84019fd2eef",
+  "uncommitted_changes": false
+}
