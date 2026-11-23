@@ -309,14 +309,28 @@ MUTATIONS = (
     (
         "round-trip server replies to actor 0 always",
         ROUND_TRIP_SCRIPT,
-        "reply_queues[actor_id].put((slot, request_id, answers[row]))",
-        "reply_queues[0].put((slot, request_id, answers[row]))",
+        "reply_queues[row_actors[row]].put([(row_slots[row], row_ids[row], answers[row])])",
+        "reply_queues[0].put([(row_slots[row], row_ids[row], answers[row])])",
     ),
     (
         "round-trip server reverses the answers in a batch",
         ROUND_TRIP_SCRIPT,
-        "reply_queues[actor_id].put((slot, request_id, answers[row]))",
-        "reply_queues[actor_id].put((slot, request_id, answers[len(requests) - 1 - row]))",
+        "reply_queues[row_actors[row]].put([(row_slots[row], row_ids[row], answers[row])])",
+        "reply_queues[row_actors[row]].put("
+        "[(row_slots[row], row_ids[row], answers[len(decisions) - 1 - row])])",
+    ),
+    (
+        "bulk server replies to actor 0 always",
+        ROUND_TRIP_SCRIPT,
+        "reply_queues[actor_id].put(replies_by_actor[actor_id])",
+        "reply_queues[0].put(replies_by_actor[actor_id])",
+    ),
+    (
+        "bulk server pairs answers with the wrong requests",
+        ROUND_TRIP_SCRIPT,
+        "replies_by_actor[actor_id].append((row_slots[row], row_ids[row], answers[row]))",
+        "replies_by_actor[actor_id].append("
+        "(row_slots[row], row_ids[row], answers[len(decisions) - 1 - row]))",
     ),
     (
         "run speedup cap not shrunk by the learner's slowdown",

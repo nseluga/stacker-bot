@@ -1,6 +1,6 @@
 """
 Gates for scripts/round_trip_probe.py (stage plan specialist_explore, actor-throughput stage
-piece 1b): every answer reaches the actor, hand and decision that asked for it through the real
+piece 1b, step 13c): in both message designs every answer reaches the actor, hand and decision that asked for it through the real
 process queues, and the run's gain is capped by the learner as slowed by the server.
 """
 
@@ -34,10 +34,12 @@ HIGH_ACTOR_SPEEDUP = 3.0
 LOW_ACTOR_SPEEDUP = 1.2
 
 
-def test_each_actor_gets_its_own_answers():
+@pytest.mark.parametrize("bulk", [False, True])
+def test_each_actor_gets_its_own_answers(bulk):
     # catches: a reply sent to the wrong actor (both actors' request ids start at 0, so only
     # the answer's value shows it), to the wrong slot (the actor raises and never reports), and
-    # answers out of row order within a batch.
+    # answers out of row order within a batch, in each message design; and the bulk flag not
+    # reaching the actors (one request per message either way).
     decisions = throughput_ceiling.choice_decisions(PLAYERS, DEV_SEED, POOL_SIZE)
     net = throughput_ceiling.untrained_net()
     alone = []
@@ -48,10 +50,14 @@ def test_each_actor_gets_its_own_answers():
 
     result = round_trip_probe.run_setting(
         NUM_ACTORS, HANDS, False, decisions, KEPT_SECONDS, CHOICE_SHARE, "cpu", DEV_SEED,
-        WARMUP_SECONDS, MEASURE_SECONDS, True,
+        WARMUP_SECONDS, MEASURE_SECONDS, True, bulk,
     )
     # With one decision per call, row order could not go wrong.
     assert result["mean_batch"] > 1
+    if bulk:
+        assert result["requests_per_message"] > 1
+    else:
+        assert result["requests_per_message"] == 1
     for actor_answers in result["answers"]:
         assert len(actor_answers) > 0
         for pool_index, answer in actor_answers:
