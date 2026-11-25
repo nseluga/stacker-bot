@@ -15,14 +15,21 @@ Some bugs only show on one kind of machine. A batch left on the CPU is harmless 
 on the CPU too, so the device bugs are planted only where there is a CUDA GPU (teapot); the
 "no GPU" refusal only where there is none (the laptop). A full record needs a run on each.
 
-Run from the repo root (about half an hour: each of ~40 runs takes ~40 s):
+Run from the repo root (60-100 min in full: each of ~60 runs takes 1-2 min):
     PYTHONPATH=src .venv/bin/python scripts/mutation_check.py
+Two flags make it shorter. --first-red stops each gate run at its first red gate, so a row names
+one failed gate, not all of them; that still settles red or green. --resume-log PATH reads the
+screen output of a run that died part way and copies its finished bugs into the result instead
+of planting them again; the baseline always runs again, so the "no bug is green" check is fresh.
+    PYTHONPATH=src .venv/bin/python scripts/mutation_check.py --first-red \
+        --resume-log scratch/mutation_fast_actor_laptop_crashed.log
 Output: a table on screen, and under results/specialist_explore/ the file
 mutation_check_fast_actor.json (machine without a GPU) or mutation_check_fast_actor_cuda.json
 (with one). The earlier records, mutation_check_dmc*.json (stage 4) and mutation_check_arms*.json
 (stage 5 before the fast actor), are from their own commits and are not overwritten.
 """
 
+import argparse
 import json
 import shutil
 import subprocess
@@ -57,6 +64,10 @@ GATES_FILES = (
     "tests/test_plot_arms.py",
     "tests/test_round_trip_probe.py",
 )
+# The screen line for a bug that turned no gate red; resumed rows need it to read as green.
+NO_GATE_FAILED = "no gate failed"
+# Separates the failed gates on one screen line (gate names never contain it).
+GATES_SEPARATOR = ", "
 # Longest one gate run may take before it is recorded as hung (a normal run is about 40 s).
 GATES_TIMEOUT_SECONDS = 600
 RESULTS_DIR = REPO_ROOT / "results" / "specialist_explore"
@@ -489,8 +500,36 @@ NO_CUDA_MUTATIONS = (
 )
 
 
+def rows_from_log(log_text, names):
+    """
+    Reads the finished bugs out of an earlier run's screen output.
+    log_text: str, what main printed, one "<bug name>: <failed gates>" line per finished bug.
+    names: the bug names this run would plant.
+    Returns a dict from bug name to its list of failed gates, for every name with a line.
+    A line is matched by its known name, not by splitting at ":", since some names hold commas.
+    """
+    finished = {}
+    for line in log_text.splitlines():
+        for name in names:
+            prefix = name + ": "
+            if not line.startswith(prefix):
+                continue
+            verdict = line[len(prefix):]
+            if verdict == NO_GATE_FAILED:
+                finished[name] = []
+            else:
+                finished[name] = verdict.split(GATES_SEPARATOR)
+    return finished
+
+
 def main():
     """Runs the gates once unchanged, then once per planted bug; prints and saves the table."""
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--first-red", action="store_true",
+                        help="stop each gate run at its first red gate (pytest -x)")
+    parser.add_argument("--resume-log", default=None,
+                        help="screen output of an earlier run whose finished bugs are copied")
+    args = parser.parse_args()
     commit, uncommitted_changes = git_state()
 
     # The first run plants nothing. It must be all green, or a red gate later proves nothing.
@@ -517,8 +556,30 @@ def main():
     for mutation in left_out:
         not_planted.append(mutation[0])
 
+    # Bugs already finished in the earlier run are copied, not planted again. The baseline is
+    # never copied: the green check must come from this run's code.
+    resumed = {}
+    if args.resume_log is not None:
+        bug_names = []
+        for mutation in runs[1:]:
+            bug_names.append(mutation[0])
+        resumed = rows_from_log(Path(args.resume_log).read_text(), bug_names)
+
+    pytest_flags = ["-q", "--tb=no", "-rfE", "-p", "no:cacheprovider"]
+    if args.first_red:
+        pytest_flags.append("-x")
+
     rows = []
     for name, relative_path, old_text, new_text in runs:
+        if name in resumed:
+            rows.append({"mutation": name, "failed_gates": resumed[name],
+                         "from_log": args.resume_log})
+            # Same line format as a fresh run, so this output can itself be resumed from.
+            if len(resumed[name]) == 0:
+                print(f"{name}: {NO_GATE_FAILED}", flush=True)
+            else:
+                print(f"{name}: {GATES_SEPARATOR.join(resumed[name])}", flush=True)
+            continue
         with tempfile.TemporaryDirectory() as copy_root:
             copy_root = Path(copy_root)
             for directory in COPIED_DIRECTORIES:
@@ -550,10 +611,8 @@ def main():
             # -rfE: one "FAILED <test>" or "ERROR <test>" line per red gate. -p no:cacheprovider:
             # no .pytest_cache in the copy. The copy's pyproject.toml points pytest at the
             # copy's src/ and tests/, so the repo's code is not what runs.
-            command = [
-                sys.executable, "-m", "pytest", *GATES_FILES,
-                "-q", "--tb=no", "-rfE", "-p", "no:cacheprovider",
-            ]
+            # -x (with --first-red): stop at the first red gate.
+            command = [sys.executable, "-m", "pytest", *GATES_FILES, *pytest_flags]
             hung = False
             try:
                 finished = subprocess.run(
@@ -579,9 +638,9 @@ def main():
 
         rows.append({"mutation": name, "failed_gates": failed_gates})
         if len(failed_gates) == 0:
-            verdict = "no gate failed"
+            verdict = NO_GATE_FAILED
         else:
-            verdict = ", ".join(failed_gates)
+            verdict = GATES_SEPARATOR.join(failed_gates)
         print(f"{name}: {verdict}", flush=True)
 
     if len(rows[0]["failed_gates"]) != 0:
@@ -600,6 +659,8 @@ def main():
         "commit": commit,
         "uncommitted_changes": uncommitted_changes,
         "cuda": has_cuda,
+        "first_red_only": args.first_red,
+        "resume_log": args.resume_log,
         "rows": rows,
         "missed": missed,
         "not_planted": not_planted,
