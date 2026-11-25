@@ -1,0 +1,9 @@
+{
+  "run": "4p1d_dmc_teapot_a24_u18750_seed20",
+  "reference": "4p1d_dmc_teapot_a24_u3125_seed20",
+  "matched": 3,
+  "misses": [],
+  "verdict": "pass",
+  "git_commit": "55f257d26993c714c43d64bfa9dfc93fb470533b",
+  "uncommitted_changes": true
+}
