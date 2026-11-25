@@ -64,6 +64,7 @@ from stacker.dmc import (
     choose_action,
     choose_actions_batched,
     collate_samples,
+    draw_chair_seat,
     fast_actor_loop,
     hand_stream_name,
     learner_step,
@@ -74,7 +75,8 @@ from stacker.dmc import (
     train_one_process,
 )
 from stacker.encode import ACTION_DIM, HISTORY_WINDOW, MOVE_DIM, STATE_DIM, encode_action
-from stacker.game import HandState, new_hand
+from stacker.game import HandState, new_hand, play_out
+from stacker.heuristic import heuristic_agent
 from stacker.net import QNet
 
 # Batched-pick gate: copies of one dev hand's decisions, each copy with its own rngs, so the
@@ -152,6 +154,14 @@ STREAM_HAND = 7
 # Actor-stream gate: actors compared, and the hands each plays before the stand-in queue stops it.
 STREAM_GATE_ACTORS = 2
 STREAM_GATE_HANDS = 2
+# Heuristic-chair gates: the seat the hand tests give the heuristic (any seat but 0 would do; 0
+# leads more often, so a seat that is not first is the stricter case).
+CHAIR_TEST_SEAT = 2
+# Seat-draw test: 400 hand streams over 4 seats expect 100 each, standard deviation about 8.7.
+# The band is about 4.6 standard deviations wide each way, and the streams are fixed.
+CHAIR_DRAWS = 400
+CHAIR_COUNT_LOW = 60
+CHAIR_COUNT_HIGH = 140
 # Two-actor smoke: a hand is about 70 decisions, so 256 samples take several hands and three
 # such batches leave time for both actors to deliver. About 3 s, most of it process start.
 SMOKE_ACTORS = 2
@@ -856,6 +866,113 @@ def test_actor_plays_the_hands_its_stream_names():
     assert not samples_equal(hands_by_actor[0][0], hands_by_actor[0][1])
 
 
+def chair_hand(monkeypatch):
+    """
+    Plays one dev-seed hand with a fresh seeded net in every seat but CHAIR_TEST_SEAT, which
+    heuristic_agent plays. A spy stands in for heuristic_agent and play_out is wrapped, so the
+    test sees what the heuristic was asked and what the hand scored.
+    Returns (samples, trace, chair_calls, hand_points):
+      chair_calls: list in call order of (seat the observation was for, action returned).
+      hand_points: the final score per seat, as play_out gave it.
+    """
+    chair_calls = []
+    played = []
+
+    def spy_heuristic(observation, actions, rng):
+        action = heuristic_agent(observation, actions, rng)
+        chair_calls.append((observation.seat, action))
+        return action
+
+    def recording_play_out(state, agents, rng):
+        trace, hand_points = play_out(state, agents, rng)
+        played.append(hand_points)
+        return trace, hand_points
+
+    # self_play_hand looks both names up in stacker.dmc when it runs, so these are what it uses.
+    monkeypatch.setattr("stacker.dmc.heuristic_agent", spy_heuristic)
+    monkeypatch.setattr("stacker.dmc.play_out", recording_play_out)
+    rng = random.Random(DEV_SEED)
+    state = new_hand(NUM_PLAYERS, rng)
+    samples, trace = self_play_hand(
+        state, seeded_net(), EPSILON, rng, HISTORY_WINDOW, CHAIR_TEST_SEAT
+    )
+    return samples, trace, chair_calls, played[0]
+
+
+def test_chair_seat_is_played_by_the_heuristic(monkeypatch):
+    # catches: the net playing the chair seat, or the heuristic sat in the wrong seat.
+    samples, trace, chair_calls, hand_points = chair_hand(monkeypatch)
+
+    # The chair seat's turns, in play order, as the trace records them.
+    chair_turns = []
+    for seat, action in trace:
+        if seat == CHAIR_TEST_SEAT:
+            chair_turns.append((seat, action))
+
+    # The heuristic was asked once per chair turn, only ever for the chair seat, and every move
+    # it gave is the move the trace shows: so it, and nothing else, played that seat.
+    assert len(chair_turns) > 0
+    assert chair_calls == chair_turns
+
+
+def test_chair_decisions_are_not_samples(monkeypatch):
+    # catches: the chair's decisions stored as samples, or a net seat's decisions dropped.
+    samples, trace, chair_calls, hand_points = chair_hand(monkeypatch)
+
+    # The net's turns: the trace with the chair seat's turns skipped.
+    net_turns = []
+    for seat, action in trace:
+        if seat != CHAIR_TEST_SEAT:
+            net_turns.append((seat, action))
+
+    # One sample per net turn, in the same order: each stores the action that turn played and
+    # carries that turn's seat's final score.
+    assert len(samples) == len(net_turns)
+    for (seat, action), sample in zip(net_turns, samples):
+        state_vector, history, history_mask, taken_action, hand_return = sample
+        assert np.array_equal(taken_action[0], encode_action(action))
+        assert hand_return == float(hand_points[seat])
+
+
+def test_chair_seat_is_uniform():
+    # catches: a fixed chair seat, or a draw that can never pick some seat (randrange(3)).
+    counts = [0] * NUM_PLAYERS
+    for hand_index in range(CHAIR_DRAWS):
+        # The draw comes after the deal from the same rng, as in actor_loop.
+        hand_rng = random.Random(hand_stream_name(DEV_SEED, STREAM_ACTOR, hand_index))
+        state = new_hand(NUM_PLAYERS, hand_rng)
+        counts[draw_chair_seat(hand_rng, len(state.hands))] += 1
+
+    for seat in range(NUM_PLAYERS):
+        assert CHAIR_COUNT_LOW <= counts[seat] <= CHAIR_COUNT_HIGH, counts
+
+
+def test_actor_plays_the_chair_its_stream_names():
+    # catches: actor_loop ignoring heuristic_chair, or drawing the seat before the deal or from
+    # another rng (either way the hand differs from the one its stream name gives).
+    q_net = seeded_net()
+    threads_before = torch.get_num_threads()
+    sample_queue = StoppingQueue(STREAM_GATE_HANDS)
+    try:
+        with pytest.raises(QueueFull):
+            actor_loop(0, DEV_SEED, q_net, sample_queue, 0.0, HISTORY_WINDOW, True)
+    finally:
+        torch.set_num_threads(threads_before)
+
+    # Each queued hand is the hand its stream deals, with the chair seat drawn just after the
+    # deal from the same rng, played at epsilon 0.
+    assert len(sample_queue.items) == STREAM_GATE_HANDS
+    for hand_index in range(STREAM_GATE_HANDS):
+        hand_rng = random.Random(hand_stream_name(DEV_SEED, 0, hand_index))
+        state = new_hand(NUM_PLAYERS, hand_rng)
+        chair_seat = draw_chair_seat(hand_rng, len(state.hands))
+        expected_samples, _ = self_play_hand(
+            state, q_net, 0.0, hand_rng, HISTORY_WINDOW, chair_seat
+        )
+        queued_samples = sample_queue.items[hand_index][3]
+        assert samples_equal(queued_samples, expected_samples)
+
+
 def parameter_count(net):
     """The number of weights in a net: an int."""
     total = 0
@@ -905,6 +1022,7 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
         hidden_layers=ARM_HIDDEN_LAYERS,
         history_hidden=ARM_HISTORY_HIDDEN,
         history_window=ARM_HISTORY_WINDOW,
+        heuristic_chair=True,
     )
 
     # The sizes reached the learner's net and the actors' net.
@@ -917,10 +1035,12 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
         assert type(optimizer) is torch.optim.Adam
         assert optimizer.param_groups[0]["lr"] == ARM_LEARNING_RATE
 
-    # Every actor was started with the run's epsilon: actor_loop's fifth argument.
+    # Every actor was started with the run's epsilon and the chair setting: actor_loop's fifth
+    # and seventh arguments.
     assert len(actor_arguments) == SMOKE_ACTORS
     for arguments in actor_arguments:
         assert arguments[4] == 0.0
+        assert arguments[6] is True
 
     # The actors encoded at the run's window: every sample the learner got has 96 history rows.
     for samples in learner_batches:
@@ -1083,8 +1203,8 @@ def test_train_script_passes_its_arm_flags_on():
         "--width", str(ARM_WIDTH), "--layers", str(ARM_HIDDEN_LAYERS),
         "--history-hidden", str(ARM_HISTORY_HIDDEN), "--lr", str(ARM_LEARNING_RATE),
         "--history-window", str(ARM_HISTORY_WINDOW),
-        "--epsilon", "0.0", "--optimizer", "adam", "--arm", SCRIPT_ARM_TAG,
-        "--base-run", SCRIPT_BASE_RUN,
+        "--epsilon", "0.0", "--optimizer", "adam", "--heuristic-chair",
+        "--arm", SCRIPT_ARM_TAG, "--base-run", SCRIPT_BASE_RUN,
     ]
     finished = subprocess.run(
         command, cwd=REPO_ROOT, env=environment, capture_output=True, text=True
@@ -1114,6 +1234,7 @@ def test_train_script_passes_its_arm_flags_on():
     assert config["epsilon"] == 0.0
     assert config["optimizer"] == "adam"
     assert config["base_run"] == SCRIPT_BASE_RUN
+    assert config["heuristic_chair"] is True
     # The net that was trained has the arm's size, not only the record of it.
     total = 0
     for weights in checkpoint_weights.values():

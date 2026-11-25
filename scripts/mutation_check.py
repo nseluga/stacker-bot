@@ -268,14 +268,44 @@ MUTATIONS = (
     (
         "actors encode at the fixed window, not the run's",
         DMC,
-        "self_play_hand(state, actor_net, epsilon, hand_rng, history_window)",
-        "self_play_hand(state, actor_net, epsilon, hand_rng)",
+        "hand_rng, history_window, chair_seat",
+        "hand_rng, HISTORY_WINDOW, chair_seat",
     ),
     (
         "optimizer name ignored",
         DMC,
         '    if optimizer == "rmsprop":\n',
         "    if True:\n",
+    ),
+    (
+        "net plays the chair seat",
+        DMC,
+        "        if seat == chair_seat:\n",
+        "        if False:\n",
+    ),
+    (
+        "chair seat draw never picks the last seat",
+        DMC,
+        "    return hand_rng.randrange(num_seats)\n",
+        "    return hand_rng.randrange(num_seats - 1)\n",
+    ),
+    (
+        "actor ignores the heuristic chair",
+        DMC,
+        "        if heuristic_chair:\n",
+        "        if False:\n",
+    ),
+    (
+        "train drops the heuristic chair before the actors",
+        DMC,
+        "                    heuristic_chair,\n",
+        "                    False,\n",
+    ),
+    (
+        "script drops the heuristic chair key",
+        TRAIN_SCRIPT,
+        '        config["heuristic_chair"] = True\n',
+        '        config["heuristic_chair"] = False\n',
     ),
     (
         "learning rate ignored",

@@ -44,6 +44,7 @@ import torch
 
 from stacker.encode import HISTORY_WINDOW, encode_decision
 from stacker.game import apply_action, legal_actions, new_hand, observe, play_out, points
+from stacker.heuristic import heuristic_agent
 from stacker.net import (
     DEFAULT_HIDDEN_LAYERS,
     DEFAULT_HISTORY_HIDDEN,
@@ -206,22 +207,31 @@ def choose_actions_batched(q_net, decisions, epsilon, rngs, device):
     return choices
 
 
-def self_play_hand(state, q_net, epsilon, rng, history_window=HISTORY_WINDOW):
+def self_play_hand(state, q_net, epsilon, rng, history_window=HISTORY_WINDOW, chair_seat=None):
     """
     Plays one dealt hand with q_net in every seat and returns a training sample per decision
-    (spec part 8, equations 8-9).
+    (spec part 8, equations 8-9). With chair_seat set, that one seat is played by
+    heuristic_agent instead (the heuristic-chair arm) and its decisions are not samples.
     state: a HandState, already dealt (changed in place, as play_out does).
     q_net: a QNet. epsilon: exploration probability, passed to choose_action.
     rng: a random.Random; drives every random pick in the hand.
     history_window: int, moves of history each decision is encoded with (H below).
+    chair_seat: None (every seat is the net: the control), or an int seat in
+      range(len(state.hands)) played by heuristic_agent.
     Returns (samples, trace).
-      samples: list in play order, one per decision, forced turns included. Each is
+      samples: list in play order, one per net decision, forced turns included. Each is
         (state_vector [STATE_DIM], history [H, MOVE_DIM], history_mask [H],
         taken_action [1, ACTION_DIM], hand_return): the first three as encode_decision gives
         them, taken_action the one row of the action that was played, hand_return a float, the
         deciding seat's final score (2, 1 or 0).
-      trace: the list of (seat, action) from play_out; samples[n] is the decision behind trace[n].
+      trace: the list of (seat, action) from play_out. With no chair, samples[n] is the decision
+        behind trace[n]; with a chair, the samples follow the trace with the chair's turns skipped.
     """
+    # A seat outside the table would match no seat and silently give pure self-play.
+    if chair_seat is not None and chair_seat not in range(len(state.hands)):
+        last_seat = len(state.hands) - 1
+        raise ValueError(f"chair_seat must be None or a seat 0-{last_seat}, got {chair_seat}")
+
     # Filled by the agent below while the hand is played. The return is not known yet, so each
     # record keeps the seat, to look its score up afterwards.
     records = []
@@ -238,10 +248,18 @@ def self_play_hand(state, q_net, epsilon, rng, history_window=HISTORY_WINDOW):
         records.append((observation.seat, state_vector, history, history_mask, taken_action))
         return actions[index]
 
-    # Self-play: the same net, and so the same agent, sits in every seat.
+    # Self-play: the same net, and so the same agent, sits in every seat but the chair.
+    # The chair's decisions are not recorded. A decision's target is its seat's final score,
+    # which here measures the heuristic playing on, not the net; learning from it would pull
+    # the net's Q toward the heuristic's values (off-policy Monte Carlo, Sutton & Barto 5.5).
+    # The heuristic draws from the same hand rng play_out hands every agent, so the hand
+    # still replays exactly from its stream name.
     agents = []
-    for _ in state.hands:
-        agents.append(recording_agent)
+    for seat in range(len(state.hands)):
+        if seat == chair_seat:
+            agents.append(heuristic_agent)
+        else:
+            agents.append(recording_agent)
     trace, hand_points = play_out(state, agents, rng)
 
     return samples_from_records(records, hand_points), trace
@@ -640,7 +658,17 @@ def shared_net_device(net):
     return next(net.parameters()).device
 
 
-def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon, history_window):
+def draw_chair_seat(hand_rng, num_seats):
+    """
+    The heuristic chair's seat for one hand: uniform over the num_seats seats, drawn from the
+    hand's own rng so the hand replays from its stream name. Returns an int in range(num_seats).
+    """
+    return hand_rng.randrange(num_seats)
+
+
+def actor_loop(
+    actor_id, seed, actor_net, sample_queue, epsilon, history_window, heuristic_chair=False
+):
     """
     Plays hands forever and queues their samples: the target function of one actor process
     (spec parts 7-8). Never returns; the process that started it ends it.
@@ -655,6 +683,8 @@ def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon, history_window)
     epsilon: exploration probability, passed to self_play_hand.
     history_window: int, the run's history window, passed to self_play_hand. The samples arrive
       at the learner already encoded at this window, so the learner needs no window of its own.
+    heuristic_chair: True plays one random seat of every hand with heuristic_agent (set 8);
+      that seat's decisions are not samples (see self_play_hand). False is the control.
     """
     # By default torch spreads one forward pass over every core. With one actor process per
     # core that would be many times more threads than cores, each waiting on the others.
@@ -665,10 +695,19 @@ def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon, history_window)
         # One rng per hand: no two actors of a run, and no two runs, play the same deal.
         hand_rng = random.Random(hand_stream_name(seed, actor_id, hands_played))
         state = new_hand(NUM_PLAYERS, hand_rng)
+
+        # The seat is drawn after the deal, so the cards dealt are the control's; only the play
+        # that follows differs.
+        chair_seat = None
+        if heuristic_chair:
+            chair_seat = draw_chair_seat(hand_rng, len(state.hands))
+
         # The learner may be writing new weights while this hand is played, with no lock, as
         # in DouZero: a decision can be scored by a mix of the old and new weights, which
         # differ by one small update.
-        samples, _ = self_play_hand(state, actor_net, epsilon, hand_rng, history_window)
+        samples, _ = self_play_hand(
+            state, actor_net, epsilon, hand_rng, history_window, chair_seat
+        )
 
         # put waits while the queue is full. That wait is the brake: actors cannot make
         # samples faster than the learner uses them and fill memory.
@@ -774,6 +813,7 @@ def train(
     fast_actor=False,
     actor_hands=FAST_ACTOR_HANDS,
     actor_devices=("cpu",),
+    heuristic_chair=False,
 ):
     """
     Runs the training loop with actors in their own processes (spec parts 7-9 and 12).
@@ -804,6 +844,8 @@ def train(
     actor_devices: device names the fast actors are spread over, actor a on
       actor_devices[a % len(actor_devices)], e.g. ("cuda:0", "cuda:1"). Unused when fast_actor
       is False.
+    heuristic_chair: True seats heuristic_agent in one random seat of every hand (set 8); only
+      the actor_loop path has the chair, so it is refused with fast_actor.
     Each log line also has actor_lag_mean and actor_lag_max: over the hands this update took,
       how many updates older than the learner's the weights that finished each hand were. Both
       are None when fast_actor is False.
@@ -812,6 +854,10 @@ def train(
     Must be called under `if __name__ == "__main__":` in a script: each actor process starts by
       importing the script again.
     """
+    # The fast actor has no chair path: running it would silently turn the arm into the control.
+    if fast_actor and heuristic_chair:
+        raise ValueError("heuristic_chair runs on actor_loop only; drop fast_actor")
+
     # QNet() draws its starting weights from torch's global random stream, so seeding that
     # stream first fixes them. The net is built on the CPU whatever the device: a GPU has its
     # own random stream, and weights drawn there would differ from the CPU's for the same seed.
@@ -880,7 +926,15 @@ def train(
         else:
             actor = context.Process(
                 target=actor_loop,
-                args=(actor_id, seed, actor_net, sample_queue, epsilon, history_window),
+                args=(
+                    actor_id,
+                    seed,
+                    actor_net,
+                    sample_queue,
+                    epsilon,
+                    history_window,
+                    heuristic_chair,
+                ),
                 daemon=True,
             )
         actor.start()

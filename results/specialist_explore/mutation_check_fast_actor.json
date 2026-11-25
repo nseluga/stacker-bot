@@ -1,0 +1,414 @@
+{
+  "gates_files": [
+    "tests/test_dmc.py",
+    "tests/test_evaluate_checkpoints.py",
+    "tests/test_net.py",
+    "tests/test_encode.py",
+    "tests/test_arms.py",
+    "tests/test_plot_arms.py",
+    "tests/test_round_trip_probe.py"
+  ],
+  "commit": "2dc04b2ee08702e7304b14a6dbdf15f1b846eee4",
+  "uncommitted_changes": true,
+  "cuda": false,
+  "first_red_only": true,
+  "resume_log": null,
+  "rows": [
+    {
+      "mutation": "baseline (no bug)",
+      "failed_gates": []
+    },
+    {
+      "mutation": "return of the next seat",
+      "failed_gates": [
+        "test_scripted_hand_gives_each_decision_its_own_seats_score"
+      ]
+    },
+    {
+      "mutation": "stored action is row 0, not the one played",
+      "failed_gates": [
+        "test_lockstep_hands_equal_self_play_hand"
+      ]
+    },
+    {
+      "mutation": "forced turn calls the net",
+      "failed_gates": [
+        "test_forced_turn_skips_the_net"
+      ]
+    },
+    {
+      "mutation": "greedy pick takes the lowest Q",
+      "failed_gates": [
+        "test_epsilon_zero_picks_the_highest_q"
+      ]
+    },
+    {
+      "mutation": "returns shaped [B, 1]",
+      "failed_gates": [
+        "test_collate_samples_shapes"
+      ]
+    },
+    {
+      "mutation": "no gradient clip",
+      "failed_gates": [
+        "test_large_gradient_is_clipped_to_the_cap"
+      ]
+    },
+    {
+      "mutation": "old gradients not cleared",
+      "failed_gates": [
+        "test_old_gradients_are_cleared_before_an_update"
+      ]
+    },
+    {
+      "mutation": "one-process loop reuses its samples",
+      "failed_gates": [
+        "test_one_process_loop_trains_on_each_sample_once"
+      ]
+    },
+    {
+      "mutation": "actor loop reuses its samples",
+      "failed_gates": [
+        "test_fast_actor_run_learns_from_fresh_weights"
+      ]
+    },
+    {
+      "mutation": "weights never copied to the actors",
+      "failed_gates": [
+        "tests/test_dmc.py"
+      ]
+    },
+    {
+      "mutation": "every actor plays the same stream",
+      "failed_gates": [
+        "test_actor_plays_the_hands_its_stream_names"
+      ]
+    },
+    {
+      "mutation": "shuffle moves the actions with the returns",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns"
+      ]
+    },
+    {
+      "mutation": "shuffle leaves the returns in order",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns"
+      ]
+    },
+    {
+      "mutation": "shuffle draws returns with repeats",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns"
+      ]
+    },
+    {
+      "mutation": "shuffle changes the batch it was handed",
+      "failed_gates": [
+        "test_shuffle_moves_only_the_returns"
+      ]
+    },
+    {
+      "mutation": "shuffle flag ignored",
+      "failed_gates": [
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "shuffle result thrown away",
+      "failed_gates": [
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "return variance divides by B - 1",
+      "failed_gates": [
+        "test_shuffle_control_is_off_unless_asked_for"
+      ]
+    },
+    {
+      "mutation": "samples_total counts updates",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "train starts from another seed",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "checkpoint 0 is not the starting net",
+      "failed_gates": [
+        "test_two_actors_feed_the_learner"
+      ]
+    },
+    {
+      "mutation": "evaluation makes random moves",
+      "failed_gates": [
+        "test_agent_plays_the_highest_scoring_action"
+      ]
+    },
+    {
+      "mutation": "checkpoint net left in training mode",
+      "failed_gates": [
+        "test_loaded_checkpoint_is_ready_to_play"
+      ]
+    },
+    {
+      "mutation": "bootstrap rng not named by the seed",
+      "failed_gates": [
+        "test_same_checkpoint_scores_the_same_twice"
+      ]
+    },
+    {
+      "mutation": "evaluation asks for the sealed deals",
+      "failed_gates": [
+        "test_same_checkpoint_scores_the_same_twice"
+      ]
+    },
+    {
+      "mutation": "eval script accepts a test seed",
+      "failed_gates": [
+        "test_script_refuses_a_test_seed"
+      ]
+    },
+    {
+      "mutation": "width argument ignored",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "depth argument ignored",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "summary size not passed to the MLP's input",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "actors encode at the fixed window, not the run's",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "optimizer name ignored",
+      "failed_gates": [
+        "test_optimizer_is_built_as_named"
+      ]
+    },
+    {
+      "mutation": "net plays the chair seat",
+      "failed_gates": [
+        "test_chair_seat_is_played_by_the_heuristic"
+      ]
+    },
+    {
+      "mutation": "chair seat draw never picks the last seat",
+      "failed_gates": [
+        "test_chair_seat_is_uniform"
+      ]
+    },
+    {
+      "mutation": "actor ignores the heuristic chair",
+      "failed_gates": [
+        "test_actor_plays_the_chair_its_stream_names"
+      ]
+    },
+    {
+      "mutation": "train drops the heuristic chair before the actors",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "script drops the heuristic chair key",
+      "failed_gates": [
+        "test_train_script_passes_its_arm_flags_on"
+      ]
+    },
+    {
+      "mutation": "learning rate ignored",
+      "failed_gates": [
+        "test_optimizer_is_built_as_named"
+      ]
+    },
+    {
+      "mutation": "arm's settings not checked against its base run",
+      "failed_gates": [
+        "test_arm_config_may_differ_from_its_base_only_where_named"
+      ]
+    },
+    {
+      "mutation": "checkpoint net built with the control sizes, not its run's",
+      "failed_gates": [
+        "test_a_1024_wide_checkpoint_loads_and_scores"
+      ]
+    },
+    {
+      "mutation": "field net built from the tested run's config",
+      "failed_gates": [
+        "test_field_net_is_built_from_its_own_config"
+      ]
+    },
+    {
+      "mutation": "arm rule drops 'above every control seed'",
+      "failed_gates": [
+        "test_verdict_known_answers"
+      ]
+    },
+    {
+      "mutation": "arm rule's loses test has the wrong sign",
+      "failed_gates": [
+        "test_verdict_known_answers"
+      ]
+    },
+    {
+      "mutation": "long control seed read at the end of its file, not at arm length",
+      "failed_gates": [
+        "test_labels_read_the_control_at_arm_length_and_all_six_plots_are_written"
+      ]
+    },
+    {
+      "mutation": "round-trip server replies to actor 0 always",
+      "failed_gates": [
+        "test_each_actor_gets_its_own_answers[False-1]"
+      ]
+    },
+    {
+      "mutation": "round-trip server reverses the answers in a batch",
+      "failed_gates": [
+        "test_each_actor_gets_its_own_answers[False-1]"
+      ]
+    },
+    {
+      "mutation": "bulk server replies to actor 0 always",
+      "failed_gates": [
+        "test_each_actor_gets_its_own_answers[True-1]"
+      ]
+    },
+    {
+      "mutation": "bulk server pairs answers with the wrong requests",
+      "failed_gates": [
+        "test_each_actor_gets_its_own_answers[True-1]"
+      ]
+    },
+    {
+      "mutation": "every actor routed to server 0",
+      "failed_gates": [
+        "test_each_actor_gets_its_own_answers[True-2]"
+      ]
+    },
+    {
+      "mutation": "actor net pairs answers with the wrong rows",
+      "failed_gates": [
+        "test_actor_net_answers_match[none]"
+      ]
+    },
+    {
+      "mutation": "learner never writes the second GPU's shared net",
+      "failed_gates": [
+        "test_write_reaches_every_shared_net"
+      ]
+    },
+    {
+      "mutation": "actor never refreshes its own net",
+      "failed_gates": [
+        "test_refresh_follows_its_schedule"
+      ]
+    },
+    {
+      "mutation": "refresh keeps a copy a write overlapped",
+      "failed_gates": [
+        "test_refresh_redoes_a_copy_a_write_overlapped"
+      ]
+    },
+    {
+      "mutation": "run speedup cap not shrunk by the learner's slowdown",
+      "failed_gates": [
+        "test_run_speedup_known_answer"
+      ]
+    },
+    {
+      "mutation": "batched pick loses the padding mask",
+      "failed_gates": [
+        "test_batched_picks_equal_choose_action"
+      ]
+    },
+    {
+      "mutation": "batched pick draws on a forced turn",
+      "failed_gates": [
+        "test_batched_picks_equal_choose_action"
+      ]
+    },
+    {
+      "mutation": "batched greedy answers in reverse order",
+      "failed_gates": [
+        "test_batched_picks_equal_choose_action"
+      ]
+    },
+    {
+      "mutation": "lockstep records all land in the first slot",
+      "failed_gates": [
+        "test_lockstep_hands_equal_self_play_hand"
+      ]
+    },
+    {
+      "mutation": "fast actor reuses a hand index on refill",
+      "failed_gates": [
+        "test_fast_actor_plays_its_own_streams"
+      ]
+    },
+    {
+      "mutation": "fast actor's stream leaves out the actor id",
+      "failed_gates": [
+        "test_fast_actor_plays_its_own_streams"
+      ]
+    },
+    {
+      "mutation": "fast actor never refreshes",
+      "failed_gates": [
+        "test_fast_actor_run_learns_from_fresh_weights"
+      ]
+    },
+    {
+      "mutation": "fast path never writes the shared nets",
+      "failed_gates": [
+        "test_fast_actor_run_learns_from_fresh_weights"
+      ]
+    },
+    {
+      "mutation": "fast checkpoint misses the learner's latest weights",
+      "failed_gates": [
+        "test_fast_actor_run_learns_from_fresh_weights"
+      ]
+    },
+    {
+      "mutation": "plain run writes fast_actor false",
+      "failed_gates": [
+        "test_plain_arm_passes_against_a_base_made_before_the_fast_actor"
+      ]
+    },
+    {
+      "mutation": "train script accepts cuda with no GPU",
+      "failed_gates": [
+        "test_train_script_refuses_cuda_without_a_gpu"
+      ]
+    }
+  ],
+  "missed": [],
+  "not_planted": [
+    "net inputs not moved to the device",
+    "returns not moved to the device",
+    "learner never moved to the device",
+    "checkpoints saved from the learner's net",
+    "fast actor's net left where its copy was made"
+  ]
+}
