@@ -1182,6 +1182,12 @@ def main():
         "(step 13f); learner-on rows only",
     )
     parser.add_argument(
+        "--actor-counts",
+        default=None,
+        help="with --weight-copy: actor counts to run, comma list (e.g. 24,16,12); today's "
+        "baseline stays at --actors",
+    )
+    parser.add_argument(
         "--refresh-every",
         default=DEFAULT_REFRESH_EVERY,
         help="hybrid design: refresh after this many updates, comma list",
@@ -1210,6 +1216,13 @@ def main():
                     weight_copy_settings.append((design_name, refresh_every))
             else:
                 weight_copy_settings.append((design_name, 1))
+    # The actor counts the weight-copy rows run at. Without --actor-counts, only --actors. The
+    # baseline always runs at --actors, today's real setup, so every row's gain is against it.
+    actor_counts = [args.actors]
+    if args.actor_counts is not None:
+        if not weight_copy_settings:
+            raise SystemExit("--actor-counts needs --weight-copy")
+        actor_counts = parse_sizes(args.actor_counts)
 
     # The fake actor's costs, per decision, from the ceiling probe's measured split.
     with open(args.ceiling_json) as file:
@@ -1231,7 +1244,8 @@ def main():
         cores = len(os.sched_getaffinity(0))
     else:
         cores = os.cpu_count()
-    cores_short = cores < args.actors + 1 + LEARNER_THREADS
+    most_actors = max(args.actors, max(actor_counts))
+    cores_short = cores < most_actors + 1 + LEARNER_THREADS
     print(f"cores: {cores}")
     if cores_short:
         print("warning: fewer cores than processes; rates will read low")
@@ -1342,21 +1356,23 @@ def main():
     hands_list = parse_sizes(args.hands)
     rows = []
     if weight_copy_settings:
-        # The weight-copy run: learner-on rows only, each design at each hands value, so the
-        # no-copy row is measured on the same machine in the same run as B and C.
-        for hands in hands_list:
-            for design_name, refresh_every in weight_copy_settings:
-                row = run(
-                    args.actors, hands, True, kept_seconds, choice_share, False, 0,
-                    gpus_available, True, design_name, refresh_every,
-                )
-                add_speedups(row, True)
-                rows.append(row)
-                print_row(
-                    f"hands {hands}, net in each actor on {gpus_available} GPUs, weight copy "
-                    f"{weight_copy_label(design_name, refresh_every)}, learner on",
-                    row,
-                )
+        # The weight-copy run: learner-on rows only, each design at each hands value and actor
+        # count, so the no-copy row is measured on the same machine in the same run as B and C.
+        for num_actors in actor_counts:
+            for hands in hands_list:
+                for design_name, refresh_every in weight_copy_settings:
+                    row = run(
+                        num_actors, hands, True, kept_seconds, choice_share, False, 0,
+                        gpus_available, True, design_name, refresh_every,
+                    )
+                    add_speedups(row, True)
+                    rows.append(row)
+                    print_row(
+                        f"actors {num_actors}, hands {hands}, net in each actor on "
+                        f"{gpus_available} GPUs, weight copy "
+                        f"{weight_copy_label(design_name, refresh_every)}, learner on",
+                        row,
+                    )
     elif args.actor_net:
         # Every actor holds its own net, spread over every GPU. The learner-on rows are what the
         # verdict reads nothing else. One learner-off row shows the learner's cost to the actors.
@@ -1405,10 +1421,13 @@ def main():
                     row,
                 )
 
-    # The verdict reads only the learner-on rows: in a real run the learner is always there.
+    # The verdict reads only the learner-on rows: in a real run the learner is always there. In
+    # a weight-copy run the no-copy row is only the ceiling (a real run must copy), so it is
+    # left out of the pick.
     best_row = None
     for row in rows:
-        if row["learner_on"]:
+        no_copy_ceiling = bool(weight_copy_settings) and row["weight_copy"] == WEIGHT_COPY_NONE
+        if row["learner_on"] and not no_copy_ceiling:
             if best_row is None or row["run_speedup"] > best_row["run_speedup"]:
                 best_row = row
     if best_row["run_speedup"] < BUILD_THRESHOLD:
@@ -1423,7 +1442,8 @@ def main():
             f", weight copy {weight_copy_label(best_row['weight_copy'], best_row['refresh_every'])}"
         )
     print(
-        f"best learner-on: hands {best_row['hands']}, {placement} on "
+        f"best learner-on: actors {best_row['num_actors']}, hands {best_row['hands']}, "
+        f"{placement} on "
         f"{best_row['num_gpus']} GPUs, run x{best_row['run_speedup']:.2f}; verdict: {verdict}"
     )
     # The best at 4 or at 16 means the peak may sit between them, if nothing was run there.
@@ -1449,6 +1469,9 @@ def main():
     if weight_copy_settings:
         design += "_weight_copy"
         limits += WEIGHT_COPY_LIMITS
+    # Its own file name, so it never overwrites the 24-actor weight-copy run.
+    if args.actor_counts is not None:
+        design += "_actor_counts"
     elif args.actor_net:
         limits += ACTOR_NET_LIMITS
     run_name = (
@@ -1475,6 +1498,8 @@ def main():
         "server_settings": server_settings,
         "actor_net": args.actor_net,
         "weight_copy_settings": weight_copy_settings,
+        "actor_counts": actor_counts,
+        "best_num_actors": best_row["num_actors"],
         "rows": rows,
         "best_hands": best_row["hands"],
         "best_num_servers": best_row["num_servers"],
