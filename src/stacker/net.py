@@ -13,6 +13,9 @@ played. The pieces, in build order:
   (decision log, 2026-11-09).
 - The scores: QNet.summarize_history turns a decision's recent moves into one vector, and
   QNet.forward joins it with the state and each action and returns one Q per action.
+- The head: the MLP's last layer gives one number per action (head "mse", the control) or three
+  placement scores (head "classifier", the set 9 arm, spec part 18). The classifier's Q is the
+  expected score of its placement probabilities, so forward returns Q either way.
 - The loss: q_loss compares the Q of the action that was played with the score the hand really
   gave (mean squared error; decision log, 2026-11-12).
 """
@@ -30,6 +33,19 @@ DEFAULT_HISTORY_HIDDEN = 128
 # Width of every hidden MLP layer, and how many of them there are before the output layer.
 DEFAULT_MLP_WIDTH = 512
 DEFAULT_HIDDEN_LAYERS = 5
+
+# The two heads (spec part 18). "mse" is the control: one output, Q itself. "classifier" gives
+# three placement logits per action, and Q is the expected score they imply.
+HEAD_MSE = "mse"
+HEAD_CLASSIFIER = "classifier"
+# The classifier's classes. Each class's index is the score that placement gives (4p1d: 2 points
+# for 1st, 1 for 2nd, 0 otherwise), so the label of a return r is class r.
+CLASS_NEITHER = 0
+CLASS_SECOND = 1
+CLASS_FIRST = 2
+PLACEMENT_CLASSES = 3
+# Output units of the last layer for each head.
+HEAD_OUTPUTS = {HEAD_MSE: 1, HEAD_CLASSIFIER: PLACEMENT_CLASSES}
 
 
 def collate_decisions(decisions):
@@ -84,19 +100,27 @@ class QNet(nn.Module):
         width=DEFAULT_MLP_WIDTH,
         hidden_layers=DEFAULT_HIDDEN_LAYERS,
         history_hidden=DEFAULT_HISTORY_HIDDEN,
+        head=HEAD_MSE,
     ):
         """
         Creates the two parts and their parameters; nothing is computed here.
         width: units in every hidden MLP layer (W in the spec).
         hidden_layers: number of (Linear, ReLU) layers before the output layer (L).
         history_hidden: size of the history summary z (D).
+        head: HEAD_MSE (one output, Q) or HEAD_CLASSIFIER (three placement logits; spec part 18).
         The defaults are the control net, 2,323,457 parameters.
         history_lstm: reads history rows [B, H, MOVE_DIM] in order, gives [B, H, history_hidden].
-        mlp: reads [..., history_hidden + STATE_DIM + ACTION_DIM], gives [..., 1]: hidden_layers
-          layers of (Linear, ReLU), width wide, then one Linear to a single number with no
-          activation, so Q can be any real value.
+        mlp: reads [..., history_hidden + STATE_DIM + ACTION_DIM], gives [..., 1] or [..., 3]:
+          hidden_layers layers of (Linear, ReLU), width wide, then one Linear to the head's
+          outputs with no activation.
         """
         super().__init__()
+        # A misspelt head would otherwise match neither branch of forward and fail later, or not
+        # at all; it is refused here instead.
+        if head not in HEAD_OUTPUTS:
+            raise ValueError(f"head must be one of {list(HEAD_OUTPUTS)}, got {head!r}")
+        self.head = head
+
         # The parts are created in a fixed order: the LSTM, then the MLP front to back. Each new
         # layer draws its starting weights from torch's one random stream, so a different order
         # would give the control different starting weights under the same seed.
@@ -111,7 +135,9 @@ class QNet(nn.Module):
             layers.append(nn.Linear(layer_input_dim, width))
             layers.append(nn.ReLU())
             layer_input_dim = width
-        layers.append(nn.Linear(width, 1))
+        # The last layer is created last for either head, so the layers before it draw the same
+        # starting weights, and QNet() draws exactly the control's.
+        layers.append(nn.Linear(width, HEAD_OUTPUTS[head]))
         self.mlp = nn.Sequential(*layers)
 
     def summarize_history(self, history, history_mask):
@@ -141,16 +167,16 @@ class QNet(nn.Module):
         # Padding is at the front, so the last step is always the latest real move.
         return step_outputs[:, -1, :]
 
-    def forward(self, state, history, history_mask, actions, action_mask):
+    def head_outputs(self, state, history, history_mask, actions):
         """
-        Scores every candidate action of every decision (spec part 3, equations 3-4).
+        The MLP's raw output for every candidate action of every decision (spec part 3,
+        equations 3-4). forward turns it into Q; the classifier's learner reads it as logits.
         state: float32 [B, STATE_DIM]. history: float32 [B, H, MOVE_DIM].
         history_mask: bool [B, H], True for real moves.
-        actions: float32 [B, K, ACTION_DIM], padded at the back. action_mask: bool [B, K], True
-          for real actions.
-        Returns Q, float32 [B, K]. Q[b, k] is the predicted final score if decision b plays its
-        action k. A padded slot holds exactly 0, which is not a score: code that picks the best
-        action must apply action_mask itself.
+        actions: float32 [B, K, ACTION_DIM], padded at the back.
+        Returns float32 [B, K, 1] for HEAD_MSE, or [B, K, PLACEMENT_CLASSES] for HEAD_CLASSIFIER:
+          the placement logits, in the order CLASS_NEITHER, CLASS_SECOND, CLASS_FIRST. Padded
+          slots hold whatever the MLP gives for a zero action; callers mask them.
         """
         history_summary = self.summarize_history(history, history_mask)  # [B, history_hidden]
 
@@ -165,7 +191,29 @@ class QNet(nn.Module):
         joined = torch.cat([summary_per_action, state_per_action, actions], dim=-1)
 
         # Equation 4: Linear layers work on the last axis, so one call scores all B x K rows.
-        q_values = self.mlp(joined).squeeze(-1)  # [B, K, 1] -> [B, K]
+        return self.mlp(joined)
+
+    def forward(self, state, history, history_mask, actions, action_mask):
+        """
+        Scores every candidate action of every decision with Q, for either head.
+        Takes head_outputs' inputs, plus action_mask: bool [B, K], True for real actions.
+        Returns Q, float32 [B, K]. Q[b, k] is the predicted final score if decision b plays its
+        action k. A padded slot holds exactly 0, which is not a score: code that picks the best
+        action must apply action_mask itself.
+        """
+        outputs = self.head_outputs(state, history, history_mask, actions)
+
+        if self.head == HEAD_MSE:
+            # The one output is Q itself.
+            q_values = outputs.squeeze(-1)  # [B, K, 1] -> [B, K]
+        else:
+            # Spec part 17: softmax turns the three logits into placement probabilities that sum
+            # to 1, and Q is the score they imply on average: 2 * P(1st) + 1 * P(2nd) + 0.
+            probabilities = torch.softmax(outputs, dim=-1)  # [B, K, 3]
+            q_values = (
+                CLASS_FIRST * probabilities[..., CLASS_FIRST]
+                + CLASS_SECOND * probabilities[..., CLASS_SECOND]
+            )  # [B, K]
         return q_values * action_mask
 
 
