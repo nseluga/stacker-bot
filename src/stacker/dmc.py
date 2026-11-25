@@ -44,6 +44,7 @@ import torch
 
 from stacker.encode import HISTORY_WINDOW, encode_decision
 from stacker.game import apply_action, legal_actions, new_hand, observe, play_out, points
+from stacker.heuristic import heuristic_agent
 from stacker.net import (
     DEFAULT_HIDDEN_LAYERS,
     DEFAULT_HISTORY_HIDDEN,
@@ -206,22 +207,31 @@ def choose_actions_batched(q_net, decisions, epsilon, rngs, device):
     return choices
 
 
-def self_play_hand(state, q_net, epsilon, rng, history_window=HISTORY_WINDOW):
+def self_play_hand(state, q_net, epsilon, rng, history_window=HISTORY_WINDOW, chair_seat=None):
     """
     Plays one dealt hand with q_net in every seat and returns a training sample per decision
-    (spec part 8, equations 8-9).
+    (spec part 8, equations 8-9). With chair_seat set, that one seat is played by
+    heuristic_agent instead (the heuristic-chair arm) and its decisions are not samples.
     state: a HandState, already dealt (changed in place, as play_out does).
     q_net: a QNet. epsilon: exploration probability, passed to choose_action.
     rng: a random.Random; drives every random pick in the hand.
     history_window: int, moves of history each decision is encoded with (H below).
+    chair_seat: None (every seat is the net: the control), or an int seat in
+      range(len(state.hands)) played by heuristic_agent.
     Returns (samples, trace).
-      samples: list in play order, one per decision, forced turns included. Each is
+      samples: list in play order, one per net decision, forced turns included. Each is
         (state_vector [STATE_DIM], history [H, MOVE_DIM], history_mask [H],
         taken_action [1, ACTION_DIM], hand_return): the first three as encode_decision gives
         them, taken_action the one row of the action that was played, hand_return a float, the
         deciding seat's final score (2, 1 or 0).
-      trace: the list of (seat, action) from play_out; samples[n] is the decision behind trace[n].
+      trace: the list of (seat, action) from play_out. With no chair, samples[n] is the decision
+        behind trace[n]; with a chair, the samples follow the trace with the chair's turns skipped.
     """
+    # A seat outside the table would match no seat and silently give pure self-play.
+    if chair_seat is not None and chair_seat not in range(len(state.hands)):
+        last_seat = len(state.hands) - 1
+        raise ValueError(f"chair_seat must be None or a seat 0-{last_seat}, got {chair_seat}")
+
     # Filled by the agent below while the hand is played. The return is not known yet, so each
     # record keeps the seat, to look its score up afterwards.
     records = []
@@ -238,10 +248,18 @@ def self_play_hand(state, q_net, epsilon, rng, history_window=HISTORY_WINDOW):
         records.append((observation.seat, state_vector, history, history_mask, taken_action))
         return actions[index]
 
-    # Self-play: the same net, and so the same agent, sits in every seat.
+    # Self-play: the same net, and so the same agent, sits in every seat but the chair.
+    # The chair's decisions are not recorded. A decision's target is its seat's final score,
+    # which here measures the heuristic playing on, not the net; learning from it would pull
+    # the net's Q toward the heuristic's values (off-policy Monte Carlo, Sutton & Barto 5.5).
+    # The heuristic draws from the same hand rng play_out hands every agent, so the hand
+    # still replays exactly from its stream name.
     agents = []
-    for _ in state.hands:
-        agents.append(recording_agent)
+    for seat in range(len(state.hands)):
+        if seat == chair_seat:
+            agents.append(heuristic_agent)
+        else:
+            agents.append(recording_agent)
     trace, hand_points = play_out(state, agents, rng)
 
     return samples_from_records(records, hand_points), trace
