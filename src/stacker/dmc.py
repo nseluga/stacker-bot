@@ -658,7 +658,17 @@ def shared_net_device(net):
     return next(net.parameters()).device
 
 
-def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon, history_window):
+def draw_chair_seat(hand_rng, num_seats):
+    """
+    The heuristic chair's seat for one hand: uniform over the num_seats seats, drawn from the
+    hand's own rng so the hand replays from its stream name. Returns an int in range(num_seats).
+    """
+    return hand_rng.randrange(num_seats)
+
+
+def actor_loop(
+    actor_id, seed, actor_net, sample_queue, epsilon, history_window, heuristic_chair=False
+):
     """
     Plays hands forever and queues their samples: the target function of one actor process
     (spec parts 7-8). Never returns; the process that started it ends it.
@@ -673,6 +683,8 @@ def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon, history_window)
     epsilon: exploration probability, passed to self_play_hand.
     history_window: int, the run's history window, passed to self_play_hand. The samples arrive
       at the learner already encoded at this window, so the learner needs no window of its own.
+    heuristic_chair: True plays one random seat of every hand with heuristic_agent (set 8);
+      that seat's decisions are not samples (see self_play_hand). False is the control.
     """
     # By default torch spreads one forward pass over every core. With one actor process per
     # core that would be many times more threads than cores, each waiting on the others.
@@ -683,10 +695,19 @@ def actor_loop(actor_id, seed, actor_net, sample_queue, epsilon, history_window)
         # One rng per hand: no two actors of a run, and no two runs, play the same deal.
         hand_rng = random.Random(hand_stream_name(seed, actor_id, hands_played))
         state = new_hand(NUM_PLAYERS, hand_rng)
+
+        # The seat is drawn after the deal, so the cards dealt are the control's; only the play
+        # that follows differs.
+        chair_seat = None
+        if heuristic_chair:
+            chair_seat = draw_chair_seat(hand_rng, len(state.hands))
+
         # The learner may be writing new weights while this hand is played, with no lock, as
         # in DouZero: a decision can be scored by a mix of the old and new weights, which
         # differ by one small update.
-        samples, _ = self_play_hand(state, actor_net, epsilon, hand_rng, history_window)
+        samples, _ = self_play_hand(
+            state, actor_net, epsilon, hand_rng, history_window, chair_seat
+        )
 
         # put waits while the queue is full. That wait is the brake: actors cannot make
         # samples faster than the learner uses them and fill memory.
@@ -792,6 +813,7 @@ def train(
     fast_actor=False,
     actor_hands=FAST_ACTOR_HANDS,
     actor_devices=("cpu",),
+    heuristic_chair=False,
 ):
     """
     Runs the training loop with actors in their own processes (spec parts 7-9 and 12).
@@ -822,6 +844,8 @@ def train(
     actor_devices: device names the fast actors are spread over, actor a on
       actor_devices[a % len(actor_devices)], e.g. ("cuda:0", "cuda:1"). Unused when fast_actor
       is False.
+    heuristic_chair: True seats heuristic_agent in one random seat of every hand (set 8); only
+      the actor_loop path has the chair, so it is refused with fast_actor.
     Each log line also has actor_lag_mean and actor_lag_max: over the hands this update took,
       how many updates older than the learner's the weights that finished each hand were. Both
       are None when fast_actor is False.
@@ -830,6 +854,10 @@ def train(
     Must be called under `if __name__ == "__main__":` in a script: each actor process starts by
       importing the script again.
     """
+    # The fast actor has no chair path: running it would silently turn the arm into the control.
+    if fast_actor and heuristic_chair:
+        raise ValueError("heuristic_chair runs on actor_loop only; drop fast_actor")
+
     # QNet() draws its starting weights from torch's global random stream, so seeding that
     # stream first fixes them. The net is built on the CPU whatever the device: a GPU has its
     # own random stream, and weights drawn there would differ from the CPU's for the same seed.
@@ -898,7 +926,15 @@ def train(
         else:
             actor = context.Process(
                 target=actor_loop,
-                args=(actor_id, seed, actor_net, sample_queue, epsilon, history_window),
+                args=(
+                    actor_id,
+                    seed,
+                    actor_net,
+                    sample_queue,
+                    epsilon,
+                    history_window,
+                    heuristic_chair,
+                ),
                 daemon=True,
             )
         actor.start()

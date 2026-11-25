@@ -17,6 +17,9 @@ An exploration arm (stage 5, spec parts 16-17): any of --width, --layers, --hist
 The fast actor (design C, decision log 2026-11-25): each actor plays many hands at once on its
 own net on a GPU, refreshed from the learner every update:
     ... --fast-actor --actors 16 --actor-hands 64 --actor-devices cuda:0,cuda:1 --device cuda:0
+The heuristic chair (set 8): one random seat of every hand is played by the heuristic, and that
+seat's decisions are not trained on; today's actor only, so it is refused with --fast-actor:
+    ... --heuristic-chair --arm heuristic-chair --base-run <the base run's name>
 An arm needs --base-run: before anything is made, its config is compared with the base run's
 config.json, and the run is refused if a setting differs that no flag on the command line
 named (check_against_base).
@@ -204,6 +207,11 @@ def main():
         "--actor-devices",
         help=f"fast actors' devices, comma-separated (default {DEFAULT_ACTOR_DEVICES})",
     )
+    parser.add_argument(
+        "--heuristic-chair",
+        action="store_true",
+        help="one random seat per hand played by the heuristic (set 8)",
+    )
     parser.add_argument("--arm", help="arm tag, added to the run name: a-z, 0-9 and -")
     parser.add_argument(
         "--base-run", help="the run this arm is compared with, a name under runs/specialist_explore/"
@@ -226,6 +234,9 @@ def main():
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise SystemExit(f"--device {args.device}: torch finds no CUDA GPU on this machine")
     fast_entries, fast_named_keys = fast_actor_settings(args)
+    # train refuses this pair too, but only after the run's directory and config exist.
+    if args.heuristic_chair and args.fast_actor:
+        raise SystemExit("--heuristic-chair runs on today's actor only; drop --fast-actor")
     if fast_actor_settings_use_cuda(fast_entries) and not torch.cuda.is_available():
         raise SystemExit(
             "--actor-devices names a GPU: torch finds no CUDA GPU on this machine"
@@ -311,6 +322,10 @@ def main():
     }
     # Only a fast run has these keys (fast_actor_settings).
     config.update(fast_entries)
+    # Only a chair run has this key, so every other arm's config keeps the base run's keys.
+    # Writing --heuristic-chair names it for check_against_base below.
+    if args.heuristic_chair:
+        config["heuristic_chair"] = True
     if args.base_run is not None:
         base_config_path = RUNS_DIR / args.base_run / "config.json"
         if not base_config_path.exists():
@@ -360,6 +375,8 @@ def main():
         fast_actor=config.get("fast_actor", False),
         actor_hands=config.get("actor_hands", FAST_ACTOR_HANDS),
         actor_devices=tuple(config.get("actor_devices", [DEFAULT_ACTOR_DEVICES])),
+        # Only a chair run's config has the key.
+        heuristic_chair=config.get("heuristic_chair", False),
     )
 
     # Summary from the log train wrote. The first update's time includes starting the actor
