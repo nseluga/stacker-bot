@@ -345,6 +345,24 @@ MUTATIONS = (
         "batch_answers = batched_choices(net, batch, device)[::-1]",
     ),
     (
+        "learner never writes the second GPU's shared net",
+        ROUND_TRIP_SCRIPT,
+        "    for shared_net in shared_nets:\n        copy_start = time.perf_counter()",
+        "    for shared_net in shared_nets[:1]:\n        copy_start = time.perf_counter()",
+    ),
+    (
+        "actor never refreshes its own net",
+        ROUND_TRIP_SCRIPT,
+        "        private_net.load_state_dict(shared_net.state_dict())\n",
+        "        shared_net.state_dict()\n",
+    ),
+    (
+        "refresh keeps a copy a write overlapped",
+        ROUND_TRIP_SCRIPT,
+        "        if version.value == before:\n",
+        "        if True:\n",
+    ),
+    (
         "run speedup cap not shrunk by the learner's slowdown",
         ROUND_TRIP_SCRIPT,
         "cap = learner_cap / learner_slowdown",

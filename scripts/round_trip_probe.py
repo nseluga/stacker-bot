@@ -25,6 +25,9 @@ Two placements reopened after the bulk no-build (decision log 2026-11-24): sever
 spread over the GPUs (--servers-grid, step 13d), and a net in each actor with no server
 (--actor-net, gpu_actor_loop, step 13e).
 
+The weight-copy probe (step 13f, decision log 2026-11-25) adds the learner's weight copy to the
+net-in-each-actor design: make_shared_nets builds one net per GPU that the learner writes into.
+
 Run from the repo root (about 10 minutes with the defaults, on teapot):
     PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14
     PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14 --bulk \
@@ -33,7 +36,9 @@ Run from the repo root (about 10 minutes with the defaults, on teapot):
         --hands 16 --servers-grid 1:1,2:2,2:1,4:2,8:2
     PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14 \
         --actor-net --hands 16,32,64
-Output: results/specialist_explore/<config>_round_trip[_bulk]_<machine>_dev_s<seconds>_seed<s>.json
+    PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14 \
+        --actor-net --hands 32,64 --weight-copy none,shared,hybrid --refresh-every 1,10
+Output: results/specialist_explore/<config>_round_trip[_bulk|_actor_net[_weight_copy]]_<machine>_dev_s<seconds>_seed<s>.json
 
 The fake costs come from the ceiling probe's split, so both probes rest on one measurement.
 
@@ -119,6 +124,21 @@ LIMITS = (
     "engine and encoding faked with a busy-wait of the ceiling split's cost; no weight copy from "
     "learner to server; the round trip includes time an answer waits for its actor to finish "
     "another hand"
+)
+# Where an --actor-net actor's weights come from (step 13f; see gpu_actor_loop).
+WEIGHT_COPY_NONE = "none"
+WEIGHT_COPY_SHARED = "shared"
+WEIGHT_COPY_HYBRID = "hybrid"
+MILLISECONDS_PER_SECOND = 1e3
+WEIGHT_COPY_DESIGNS = [WEIGHT_COPY_NONE, WEIGHT_COPY_SHARED, WEIGHT_COPY_HYBRID]
+# Design C's refresh settings: every update (Sample Factory's default) and every 10 (decision
+# log 2026-11-25, off-consensus for Monte Carlo targets if it wins).
+DEFAULT_REFRESH_EVERY = "1,10"
+# Replaces ACTOR_NET_LIMITS in a --weight-copy run: the copy is now in, but design B's mixed
+# reads are possible and not counted.
+WEIGHT_COPY_LIMITS = (
+    "; design B's actors may score during a write with mixed old and new weights, which is "
+    "not detected or counted"
 )
 # Added to LIMITS for an --actor-net run: each actor's net never gets the learner's weights.
 ACTOR_NET_LIMITS = "; no weight copy from learner to each actor's net"
@@ -272,6 +292,116 @@ def fake_actor_loop(
     )
 
 
+def make_shared_nets(context, device_names):
+    """
+    Builds the nets the learner writes its weights into: one per device, readable by every
+    process the parent starts (weight-copy probe, step 13f; designs B and C).
+
+    A CUDA tensor passed to a spawned process travels as a handle to the same GPU memory, not
+    as a copy, so a child reading the net sees the learner's later writes. That handle holds
+    only while the process that made the tensor is alive: the parent makes these nets and
+    outlives every child. A CPU net needs share_memory() for the same effect.
+
+    context: the spawn multiprocessing context the run's processes come from.
+    device_names: list of str, one per net, e.g. ["cuda:0", "cuda:1"], or ["cpu", "cpu"] in
+        the laptop tests.
+    Returns (shared_nets, version):
+      shared_nets: list of QNet in eval mode, one per device name, all with the untrained
+        starting weights.
+      version: a shared integer, 0 now; the learner raises it by one after each finished write,
+        so a reader can tell new weights from old.
+    """
+    shared_nets = []
+    for device_name in device_names:
+        net = untrained_net().to(torch.device(device_name))
+        net.eval()
+        if device_name == "cpu":
+            net.share_memory()
+        shared_nets.append(net)
+
+    # "q": a signed 64-bit integer; the Value's own lock lets the learner raise it safely.
+    version = context.Value("q", 0)
+    return shared_nets, version
+
+
+def write_weights(learner_net, shared_nets, version):
+    """
+    Copies the learner's weights into every shared net and times each copy (step 13f).
+
+    The version works as a write flag as well as a counter: it is raised once before the copies
+    (odd: a write is under way) and once after they have finished (even: every shared net holds
+    one whole set of weights). A reader that sees the same even value before and after its own
+    read knows no write overlapped it. So updates written = version // 2.
+
+    learner_net: the learner's QNet, on its own device.
+    shared_nets: list of QNet from make_shared_nets.
+    version: the shared integer from make_shared_nets; even on entry.
+    Returns a list of float, the seconds each shared net's copy took, in shared_nets order.
+    """
+    with version.get_lock():
+        version.value += 1
+
+    copy_seconds = []
+    learner_weights = learner_net.state_dict()
+    for shared_net in shared_nets:
+        copy_start = time.perf_counter()
+        # load_state_dict copies into the shared net's existing tensors, so the memory every
+        # reader holds a handle to is overwritten in place; it never swaps in new tensors.
+        shared_net.load_state_dict(learner_weights)
+        # A GPU copy only queues work; waiting for it makes the time real and makes sure the
+        # weights are in place before the version below says so.
+        if shared_net_device(shared_net).type == "cuda":
+            torch.cuda.synchronize(shared_net_device(shared_net))
+        copy_seconds.append(time.perf_counter() - copy_start)
+
+    with version.get_lock():
+        version.value += 1
+    return copy_seconds
+
+
+def refresh_private_net(private_net, shared_net, version, held_updates, refresh_every):
+    """
+    Design C's actor side (step 13f): copies the shared net into the actor's own net once the
+    learner is refresh_every or more updates ahead of it; otherwise does nothing.
+
+    The copy is kept only if the version was the same even value before and after it (see
+    write_weights): odd means a write was under way, and a changed value means one started
+    during the copy, so either way the copy may mix old and new weights and is made again.
+
+    private_net: the actor's own QNet, on the same device as shared_net.
+    shared_net: the QNet from make_shared_nets for that device.
+    version: the shared integer from make_shared_nets.
+    held_updates: int, how many learner updates private_net's weights include.
+    refresh_every: int >= 1, how many updates the learner may get ahead before a copy.
+    Returns (held_updates, copy_seconds): the updates private_net now includes, and the
+    seconds spent copying, 0.0 when no copy was due.
+    """
+    copy_seconds = 0.0
+    while True:
+        before = version.value
+        # Updates fully written so far; an odd value means the next one is being written.
+        if before // 2 - held_updates < refresh_every:
+            return held_updates, copy_seconds
+        if before % 2 == 1:
+            continue
+
+        copy_start = time.perf_counter()
+        private_net.load_state_dict(shared_net.state_dict())
+        # Wait for the copy to finish before reading the version again, or a write that started
+        # after the copy was queued could go unseen.
+        if shared_net_device(shared_net).type == "cuda":
+            torch.cuda.synchronize(shared_net_device(shared_net))
+        copy_seconds += time.perf_counter() - copy_start
+
+        if version.value == before:
+            return before // 2, copy_seconds
+
+
+def shared_net_device(net):
+    """The device a net's weights live on."""
+    return next(net.parameters()).device
+
+
 def gpu_actor_loop(
     actor_id,
     hands,
@@ -284,6 +414,10 @@ def gpu_actor_loop(
     stop_event,
     result_queue,
     record_answers,
+    weight_copy=WEIGHT_COPY_NONE,
+    shared_net=None,
+    version=None,
+    refresh_every=1,
 ):
     """
     One fake actor that scores its own decisions on its own GPU, playing `hands` hands at once
@@ -305,13 +439,34 @@ def gpu_actor_loop(
     result_queue: gets one dict at the end with fake_actor_loop's keys, so run_setting reads it
         unchanged: round_trips are from a choice turn's draw to its answer (the rest of the
         pass plus the net call), wait_seconds is 0 (the actor never blocks). Two more keys,
-        both while measuring: net_seconds (in batched_choices) and net_calls.
+        both while measuring: net_seconds (in batched_choices) and net_calls. Four more for the
+        weight-copy probe, also while measuring: refresh_seconds and refreshes (design C's
+        copies into the actor's own net), lag_sum and lag_count (summed lag over net calls).
+    weight_copy: where the weights the actor scores with come from (step 13f):
+        WEIGHT_COPY_NONE: its own net, never updated (step 13e's row);
+        WEIGHT_COPY_SHARED (design B): shared_net itself, which the learner overwrites in place,
+            so a call can run during a write and mix old and new weights;
+        WEIGHT_COPY_HYBRID (design C): its own net, refreshed from shared_net by
+            refresh_private_net just before a pass's net call once it is refresh_every or more
+            updates behind.
+    shared_net: the QNet from make_shared_nets on this actor's device; None with
+        WEIGHT_COPY_NONE.
+    version: the shared integer from make_shared_nets; None with WEIGHT_COPY_NONE.
+    refresh_every: int >= 1, used by WEIGHT_COPY_HYBRID only.
+    Lag is how many learner updates the scoring weights are behind at a net call:
+    version // 2 minus the updates the actor's own net holds. Kept for design C only; design B
+    reads the newest weights, so its lag is 0 and is not counted.
     """
     # One CPU thread per actor: 24 actors must not fight over the cores for torch's threads.
     torch.set_num_threads(1)
     device = torch.device(device_name)
-    net = untrained_net().to(device)
-    net.eval()
+    if weight_copy == WEIGHT_COPY_SHARED:
+        net = shared_net
+    else:
+        net = untrained_net().to(device)
+        net.eval()
+    # Learner updates the actor's own net includes; the shared nets start at the same weights.
+    held_updates = 0
 
     rng = random.Random(seed)
     pool_size = len(decisions)
@@ -327,6 +482,10 @@ def gpu_actor_loop(
     spin_seconds = 0.0
     net_seconds = 0.0
     net_calls = 0
+    refresh_seconds = 0.0
+    refreshes = 0
+    lag_sum = 0
+    lag_count = 0
 
     while not stop_event.is_set():
         # Every hand plays one decision; choice turns wait for the pass's one net call.
@@ -355,6 +514,21 @@ def gpu_actor_loop(
         batch = []
         for pool_index in batch_indices:
             batch.append(decisions[pool_index])
+
+        # Design C: bring the actor's own net up to date, if due, just before it scores. The
+        # copy's time is the actor's, so it also falls inside each waiting decision's round trip.
+        if weight_copy == WEIGHT_COPY_HYBRID:
+            previous_updates = held_updates
+            held_updates, copy_seconds = refresh_private_net(
+                net, shared_net, version, held_updates, refresh_every
+            )
+            if measure_event.is_set():
+                refresh_seconds += copy_seconds
+                if held_updates != previous_updates:
+                    refreshes += 1
+                lag_sum += version.value // 2 - held_updates
+                lag_count += 1
+
         net_start = time.perf_counter()
         batch_answers = batched_choices(net, batch, device)
         net_end = time.perf_counter()
@@ -378,6 +552,10 @@ def gpu_actor_loop(
             "wait_seconds": 0.0,
             "net_seconds": net_seconds,
             "net_calls": net_calls,
+            "refresh_seconds": refresh_seconds,
+            "refreshes": refreshes,
+            "lag_sum": lag_sum,
+            "lag_count": lag_count,
         }
     )
 
@@ -499,7 +677,16 @@ def server_loop(
     )
 
 
-def dummy_learner_loop(seed, device_name, ready_event, measure_event, stop_event, result_queue):
+def dummy_learner_loop(
+    seed,
+    device_name,
+    ready_event,
+    measure_event,
+    stop_event,
+    result_queue,
+    shared_nets=None,
+    version=None,
+):
     """
     A learner that does real updates back to back until stop_event is set, on one fixed batch.
 
@@ -513,7 +700,14 @@ def dummy_learner_loop(seed, device_name, ready_event, measure_event, stop_event
     device_name: str, "cuda" or "cpu".
     ready_event: set once the batch is built, so the caller can start the actors after setup.
     measure_event, stop_event: as in fake_actor_loop.
-    result_queue: gets one dict at the end: updates and update_seconds, both while measuring.
+    result_queue: gets one dict at the end: updates, update_seconds and write_seconds, all
+        while measuring. update_seconds includes the writes.
+    shared_nets: None for no weight copy, or the list from make_shared_nets; then the learner
+        writes its weights into every shared net after each update (write_weights), as a real
+        learner must for designs B and C (step 13f).
+    version: the shared integer from make_shared_nets; None when shared_nets is None.
+    write_seconds in the result: list of float, the summed seconds of each shared net's copies,
+        in shared_nets order; empty when shared_nets is None.
     """
     torch.set_num_threads(LEARNER_THREADS)
     net = untrained_net()
@@ -534,6 +728,11 @@ def dummy_learner_loop(seed, device_name, ready_event, measure_event, stop_event
     optimizer = build_optimizer(net)
     ready_event.set()
 
+    write_seconds = []
+    if shared_nets is not None:
+        for shared_net in shared_nets:
+            write_seconds.append(0.0)
+
     updates = 0
     update_seconds = 0.0
     while not stop_event.is_set():
@@ -541,11 +740,19 @@ def dummy_learner_loop(seed, device_name, ready_event, measure_event, stop_event
         # learner_step returns the loss as a Python float, which waits for the device to
         # finish: the time below covers the whole update.
         learner_step(net, optimizer, batch)
+        # The copy is part of the learner's cost, so it sits inside the update's time.
+        copy_seconds = []
+        if shared_nets is not None:
+            copy_seconds = write_weights(net, shared_nets, version)
         if measure_event.is_set():
             updates += 1
             update_seconds += time.perf_counter() - update_start
+            for net_index in range(len(copy_seconds)):
+                write_seconds[net_index] += copy_seconds[net_index]
 
-    result_queue.put({"updates": updates, "update_seconds": update_seconds})
+    result_queue.put(
+        {"updates": updates, "update_seconds": update_seconds, "write_seconds": write_seconds}
+    )
 
 
 def percentile(sorted_values, fraction):
@@ -597,6 +804,8 @@ def run_setting(
     num_servers=1,
     num_gpus=1,
     actor_net=False,
+    weight_copy=WEIGHT_COPY_NONE,
+    refresh_every=1,
 ):
     """
     Runs one setting with real processes and returns its rates.
@@ -629,7 +838,16 @@ def run_setting(
     record_answers). With actor_net, servers_used is 0, mean_batch is over the actors' own net
     calls, actor_net_share is the actors' time in those calls (part of actor_other_share), and
     gpu_used_gb lists each GPU's memory in use near the end of the window (cuda only).
+    weight_copy, refresh_every: as in gpu_actor_loop; anything but WEIGHT_COPY_NONE needs
+    actor_net. Then the parent builds one shared net per GPU (make_shared_nets), the learner
+    writes into all of them after each update, and actor a reads the one on its own GPU, a % G.
+    Added to the dict: learner_write_ms_per_update (one per shared net, GPU order; empty with
+    no copy or no learner), and for WEIGHT_COPY_HYBRID actor_refresh_share (the actors' time
+    in copies), actor_refresh_ms (mean per copy), refreshes_per_second (all actors) and
+    mean_lag_updates (over net calls).
     """
+    if weight_copy != WEIGHT_COPY_NONE and not actor_net:
+        raise ValueError("a weight copy is only probed with a net in each actor")
     # spawn, as train uses: a forked child would inherit torch's threads mid-state.
     context = multiprocessing.get_context("spawn")
     request_queues = []
@@ -643,11 +861,27 @@ def run_setting(
     for actor_id in range(num_actors):
         reply_queues.append(context.Queue())
 
+    # The shared nets live in this process, which outlives every child, so the GPU memory the
+    # children hold handles to stays valid (see make_shared_nets).
+    shared_nets = None
+    version = None
+    if weight_copy != WEIGHT_COPY_NONE:
+        shared_device_names = []
+        if num_gpus > 1:
+            for gpu in range(num_gpus):
+                shared_device_names.append(f"{device_name}:{gpu}")
+        else:
+            shared_device_names.append(device_name)
+        shared_nets, version = make_shared_nets(context, shared_device_names)
+
     processes = []
     if learner_on:
         learner = context.Process(
             target=dummy_learner_loop,
-            args=(seed, device_name, ready_event, measure_event, stop_event, result_queue),
+            args=(
+                seed, device_name, ready_event, measure_event, stop_event, result_queue,
+                shared_nets, version,
+            ),
         )
         learner.start()
         processes.append(learner)
@@ -679,11 +913,16 @@ def run_setting(
             actor_device = device_name
             if num_gpus > 1:
                 actor_device = f"{device_name}:{actor_id % num_gpus}"
+            # The shared net on the actor's own GPU, so its reads and copies never cross GPUs.
+            actor_shared_net = None
+            if shared_nets is not None:
+                actor_shared_net = shared_nets[actor_id % len(shared_nets)]
             actor = context.Process(
                 target=gpu_actor_loop,
                 args=(
                     actor_id, hands, decisions, kept_seconds, choice_share, seed + actor_id,
                     actor_device, measure_event, stop_event, result_queue, record_answers,
+                    weight_copy, actor_shared_net, version, refresh_every,
                 ),
             )
             actor.start()
@@ -760,10 +999,18 @@ def run_setting(
     # Only gpu_actor_loop actors report their own net time and calls.
     total_actor_net_seconds = 0.0
     total_actor_net_calls = 0
+    total_refresh_seconds = 0.0
+    total_refreshes = 0
+    total_lag = 0
+    total_lag_count = 0
     for result in sorted(actor_results, key=lambda item: item["actor_id"]):
         if actor_net:
             total_actor_net_seconds += result["net_seconds"]
             total_actor_net_calls += result["net_calls"]
+            total_refresh_seconds += result["refresh_seconds"]
+            total_refreshes += result["refreshes"]
+            total_lag += result["lag_sum"]
+            total_lag_count += result["lag_count"]
         total_decisions += result["decisions"]
         round_trips.extend(result["round_trips"])
         answers.append(result["answers"])
@@ -790,6 +1037,13 @@ def run_setting(
         "num_servers": num_servers,
         "num_gpus": num_gpus,
         "actor_net": actor_net,
+        "weight_copy": weight_copy,
+        "refresh_every": refresh_every,
+        "learner_write_ms_per_update": [],
+        "actor_refresh_share": None,
+        "actor_refresh_ms": None,
+        "refreshes_per_second": None,
+        "mean_lag_updates": None,
         "servers_used": None,
         "measured_seconds": measured_seconds,
         "decisions_per_second": total_decisions / measured_seconds,
@@ -854,6 +1108,22 @@ def run_setting(
             summary["mean_batch"] = len(round_trips) / total_actor_net_calls
     if learner_result is not None:
         summary["learner_updates_per_second"] = learner_result["updates"] / measured_seconds
+        if learner_result["updates"] > 0:
+            for write_seconds in learner_result["write_seconds"]:
+                summary["learner_write_ms_per_update"].append(
+                    write_seconds / learner_result["updates"] * MILLISECONDS_PER_SECOND
+                )
+    # Design C's actor side: time spent copying, how often, and how far behind the scoring
+    # weights were.
+    if weight_copy == WEIGHT_COPY_HYBRID and num_actors > 0:
+        summary["actor_refresh_share"] = total_refresh_seconds / (num_actors * measured_seconds)
+        summary["refreshes_per_second"] = total_refreshes / measured_seconds
+        if total_refreshes > 0:
+            summary["actor_refresh_ms"] = (
+                total_refresh_seconds / total_refreshes * MILLISECONDS_PER_SECOND
+            )
+        if total_lag_count > 0:
+            summary["mean_lag_updates"] = total_lag / total_lag_count
     return summary
 
 
@@ -869,6 +1139,13 @@ def run_speedup(actor_speedup, learner_cap, learner_slowdown):
         return actor_speedup
     else:
         return cap
+
+
+def weight_copy_label(design_name, refresh_every):
+    """A row's weight-copy design for printing, e.g. "hybrid every 10"."""
+    if design_name == WEIGHT_COPY_HYBRID:
+        return f"{design_name} every {refresh_every}"
+    return design_name
 
 
 def main():
@@ -898,6 +1175,17 @@ def main():
         action="store_true",
         help="each actor scores its own decisions on its own GPU share; no server, learner-on rows",
     )
+    parser.add_argument(
+        "--weight-copy",
+        default=None,
+        help=f"with --actor-net: designs to run, comma list of {','.join(WEIGHT_COPY_DESIGNS)} "
+        "(step 13f); learner-on rows only",
+    )
+    parser.add_argument(
+        "--refresh-every",
+        default=DEFAULT_REFRESH_EVERY,
+        help="hybrid design: refresh after this many updates, comma list",
+    )
     args = parser.parse_args()
     if args.seed < DEV_SEED_MIN:
         raise SystemExit(
@@ -906,6 +1194,22 @@ def main():
     # The net-in-each-actor design has no server, so no message design and no servers grid.
     if args.actor_net and (args.bulk or args.servers_grid is not None):
         raise SystemExit("--actor-net runs without --bulk or --servers-grid")
+    # The weight-copy settings, one per row of each hands value: (design, refresh_every). Only
+    # the hybrid design uses refresh_every, so it gets one setting per refresh value.
+    weight_copy_settings = []
+    if args.weight_copy is not None:
+        if not args.actor_net:
+            raise SystemExit("--weight-copy needs --actor-net")
+        for design_name in args.weight_copy.split(","):
+            if design_name not in WEIGHT_COPY_DESIGNS:
+                raise SystemExit(f"unknown weight-copy design {design_name}")
+            if design_name == WEIGHT_COPY_HYBRID:
+                for refresh_every in parse_sizes(args.refresh_every):
+                    if refresh_every < 1:
+                        raise SystemExit("--refresh-every values are 1 or more")
+                    weight_copy_settings.append((design_name, refresh_every))
+            else:
+                weight_copy_settings.append((design_name, 1))
 
     # The fake actor's costs, per decision, from the ceiling probe's measured split.
     with open(args.ceiling_json) as file:
@@ -952,11 +1256,12 @@ def main():
 
     def run(
         num_actors, hands, learner_on, kept, share, bulk, num_servers=1, num_gpus=1,
-        actor_net=False,
+        actor_net=False, weight_copy=WEIGHT_COPY_NONE, refresh_every=1,
     ):
         return run_setting(
             num_actors, hands, learner_on, decisions, kept, share, args.device, args.seed,
             args.warmup, args.seconds, False, bulk, num_servers, num_gpus, actor_net,
+            weight_copy, refresh_every,
         )
 
     def add_speedups(row, learner_on):
@@ -991,6 +1296,25 @@ def main():
                 f"{row['actor_net_share']:.0%}, other {row['actor_other_share']:.0%}; "
                 f"GPU memory in use (GB): {', '.join(memory)}"
             )
+            # The weight copy's costs: the learner's writes per GPU, and design C's refreshes.
+            if row["weight_copy"] != WEIGHT_COPY_NONE:
+                writes = []
+                for write_ms in row["learner_write_ms_per_update"]:
+                    writes.append(f"{write_ms:.2f}")
+                line = f"  weight copy: learner write ms per update per GPU {', '.join(writes)}"
+                if row["weight_copy"] == WEIGHT_COPY_HYBRID:
+                    refresh_ms = "n/a"
+                    if row["actor_refresh_ms"] is not None:
+                        refresh_ms = f"{row['actor_refresh_ms']:.2f}"
+                    mean_lag = "n/a"
+                    if row["mean_lag_updates"] is not None:
+                        mean_lag = f"{row['mean_lag_updates']:.2f}"
+                    line += (
+                        f"; actor refresh {refresh_ms} ms each, {row['refreshes_per_second']:.0f}/s"
+                        f", {row['actor_refresh_share']:.1%} of actor time; mean lag {mean_lag}"
+                        " updates"
+                    )
+                print(line)
             return
         print(
             f"  server: net {row['server_net_share']:.0%}, drain {drain}/request, "
@@ -1017,7 +1341,23 @@ def main():
 
     hands_list = parse_sizes(args.hands)
     rows = []
-    if args.actor_net:
+    if weight_copy_settings:
+        # The weight-copy run: learner-on rows only, each design at each hands value, so the
+        # no-copy row is measured on the same machine in the same run as B and C.
+        for hands in hands_list:
+            for design_name, refresh_every in weight_copy_settings:
+                row = run(
+                    args.actors, hands, True, kept_seconds, choice_share, False, 0,
+                    gpus_available, True, design_name, refresh_every,
+                )
+                add_speedups(row, True)
+                rows.append(row)
+                print_row(
+                    f"hands {hands}, net in each actor on {gpus_available} GPUs, weight copy "
+                    f"{weight_copy_label(design_name, refresh_every)}, learner on",
+                    row,
+                )
+    elif args.actor_net:
         # Every actor holds its own net, spread over every GPU. The learner-on rows are what the
         # verdict reads nothing else. One learner-off row shows the learner's cost to the actors.
         actor_net_settings = []
@@ -1078,6 +1418,10 @@ def main():
     placement = f"servers {best_row['num_servers']}"
     if best_row["actor_net"]:
         placement = "net in each actor"
+    if weight_copy_settings:
+        placement += (
+            f", weight copy {weight_copy_label(best_row['weight_copy'], best_row['refresh_every'])}"
+        )
     print(
         f"best learner-on: hands {best_row['hands']}, {placement} on "
         f"{best_row['num_gpus']} GPUs, run x{best_row['run_speedup']:.2f}; verdict: {verdict}"
@@ -1102,6 +1446,10 @@ def main():
     limits = LIMITS
     if args.actor_net:
         design += "_actor_net"
+    if weight_copy_settings:
+        design += "_weight_copy"
+        limits += WEIGHT_COPY_LIMITS
+    elif args.actor_net:
         limits += ACTOR_NET_LIMITS
     run_name = (
         f"{config_name(args.players)}_round_trip{design}_{machine}_dev_s{args.seconds:g}"
@@ -1126,10 +1474,13 @@ def main():
         "anchor": anchor,
         "server_settings": server_settings,
         "actor_net": args.actor_net,
+        "weight_copy_settings": weight_copy_settings,
         "rows": rows,
         "best_hands": best_row["hands"],
         "best_num_servers": best_row["num_servers"],
         "best_num_gpus": best_row["num_gpus"],
+        "best_weight_copy": best_row["weight_copy"],
+        "best_refresh_every": best_row["refresh_every"],
         "best_run_speedup": best_row["run_speedup"],
         "build_threshold": BUILD_THRESHOLD,
         "verdict": verdict,
