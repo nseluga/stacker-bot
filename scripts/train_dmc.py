@@ -14,6 +14,9 @@ The label-shuffle control (stage 4, spec part 13), the same run with the returns
 An exploration arm (stage 5, spec parts 16-17): any of --width, --layers, --history-hidden,
 --history-window, --lr, --epsilon, --optimizer, each defaulting to the control, plus --arm, a tag for the run:
     ... --width 256 --lr 3e-4 --arm width256-lr3e-4 --base-run <the base run's name>
+The fast actor (design C, decision log 2026-11-25): each actor plays many hands at once on its
+own net on a GPU, refreshed from the learner every update:
+    ... --fast-actor --actors 16 --actor-hands 64 --actor-devices cuda:0,cuda:1 --device cuda:0
 An arm needs --base-run: before anything is made, its config is compared with the base run's
 config.json, and the run is refused if a setting differs that no flag on the command line
 named (check_against_base).
@@ -24,7 +27,8 @@ Output, under runs/specialist_explore/<run-name>/ (gitignored):
     checkpoint_<updates done>.pt   the learner's weights (a QNet state_dict, held on the CPU);
                   checkpoint_000000.pt is the untrained net
 The default run name is <config>_dmc_<machine>_a<actors>_u<updates>_seed<seed>, with _shuffled
-at the end for the label-shuffle control and _<arm> at the end of an arm. A name given with
+at the end for the label-shuffle control, _fast for a fast-actor run and _<arm> at the end of an
+arm. A name given with
 --run-name is used as it is.
 """
 
@@ -45,6 +49,7 @@ from stacker.dmc import (
     CHECKPOINT_EVERY_UPDATES,
     CONTROL_OPTIMIZER,
     EPSILON,
+    FAST_ACTOR_HANDS,
     LEARNING_RATE,
     MAX_GRAD_NORM,
     NUM_PLAYERS,
@@ -78,6 +83,12 @@ BOOKKEEPING_KEYS = (
     "git_commit",
     "uncommitted_changes",
 )
+# Where fast actors play when --actor-devices is not given.
+DEFAULT_ACTOR_DEVICES = "cpu"
+# The config.json keys a fast-actor run adds. Writing --fast-actor names all three for the base
+# run check, so the defaults of the other two are not refused as unnamed differences.
+FAST_ACTOR_KEYS = ("fast_actor", "actor_hands", "actor_devices")
+
 # The flags whose config.json key is not the flag's own name; every other flag's key is its
 # argparse name (--samples-per-update -> samples_per_update).
 CONFIG_KEY_OF_FLAG = {"layers": "hidden_layers", "lr": "learning_rate"}
@@ -105,6 +116,45 @@ def check_against_base(config, base_config, named_keys):
         raise SystemExit(
             "differs from the base run without a flag naming it: " + "; ".join(unnamed)
         )
+
+
+def fast_actor_settings(args):
+    """
+    The fast-actor part of a run's config, and the config keys it names for check_against_base.
+    args: the parsed command line, with fast_actor (bool), actor_hands (int or None) and
+      actor_devices (a comma-separated str, or None) from --fast-actor, --actor-hands and
+      --actor-devices.
+    Returns (config_entries, named_keys). A run without --fast-actor gets ({}, set()): its
+      config has none of the keys, so it matches a base run made before the fast actor existed.
+      A fast run gets all three keys, actor_devices as a list, and all three named.
+    Raises SystemExit when --actor-hands or --actor-devices is given without --fast-actor:
+      train would ignore them, and the run would not be the one asked for.
+    """
+    if not args.fast_actor:
+        if args.actor_hands is not None or args.actor_devices is not None:
+            raise SystemExit("--actor-hands and --actor-devices need --fast-actor")
+        return {}, set()
+
+    actor_hands = args.actor_hands
+    if actor_hands is None:
+        actor_hands = FAST_ACTOR_HANDS
+    actor_devices = args.actor_devices
+    if actor_devices is None:
+        actor_devices = DEFAULT_ACTOR_DEVICES
+    config_entries = {
+        "fast_actor": True,
+        "actor_hands": actor_hands,
+        "actor_devices": actor_devices.split(","),
+    }
+    return config_entries, set(FAST_ACTOR_KEYS)
+
+
+def fast_actor_settings_use_cuda(fast_entries):
+    """True when a fast run's actor devices include a GPU."""
+    for device_name in fast_entries.get("actor_devices", []):
+        if device_name.startswith("cuda"):
+            return True
+    return False
 
 
 def main():
@@ -142,6 +192,18 @@ def main():
         "--epsilon", type=float, default=EPSILON, help="actors' random-action probability"
     )
     parser.add_argument("--optimizer", choices=OPTIMIZER_CHOICES, default=CONTROL_OPTIMIZER)
+    # The fast actor. The two settings default to None so a value given without --fast-actor
+    # can be told apart from no value (fast_actor_settings).
+    parser.add_argument(
+        "--fast-actor", action="store_true", help="design C actors: own net, many hands"
+    )
+    parser.add_argument(
+        "--actor-hands", type=int, help=f"hands per fast actor (default {FAST_ACTOR_HANDS})"
+    )
+    parser.add_argument(
+        "--actor-devices",
+        help=f"fast actors' devices, comma-separated (default {DEFAULT_ACTOR_DEVICES})",
+    )
     parser.add_argument("--arm", help="arm tag, added to the run name: a-z, 0-9 and -")
     parser.add_argument(
         "--base-run", help="the run this arm is compared with, a name under runs/specialist_explore/"
@@ -163,6 +225,11 @@ def main():
     # Checked here, before the run's directory is made, so a wrong device leaves nothing behind.
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise SystemExit(f"--device {args.device}: torch finds no CUDA GPU on this machine")
+    fast_entries, fast_named_keys = fast_actor_settings(args)
+    if fast_actor_settings_use_cuda(fast_entries) and not torch.cuda.is_available():
+        raise SystemExit(
+            "--actor-devices names a GPU: torch finds no CUDA GPU on this machine"
+        )
 
     # With the learner on a GPU its CPU threads have little to do, but each one still takes a
     # core from the actors. The setting is this process's only: an actor is its own process.
@@ -181,6 +248,8 @@ def main():
         # without a mark of its own the two would ask for one directory.
         if args.shuffle_returns:
             run_name += "_shuffled"
+        if args.fast_actor:
+            run_name += "_fast"
         if args.arm is not None:
             run_name += f"_{args.arm}"
 
@@ -240,6 +309,8 @@ def main():
         "git_commit": commit,
         "uncommitted_changes": uncommitted_changes,
     }
+    # Only a fast run has these keys (fast_actor_settings).
+    config.update(fast_entries)
     if args.base_run is not None:
         base_config_path = RUNS_DIR / args.base_run / "config.json"
         if not base_config_path.exists():
@@ -254,6 +325,7 @@ def main():
                 for word in sys.argv[1:]:
                     if word == option or word.startswith(option + "="):
                         named_keys.add(CONFIG_KEY_OF_FLAG.get(action.dest, action.dest))
+        named_keys |= fast_named_keys
         check_against_base(config, base_config, named_keys)
 
     # Made only now, so a refused run leaves no directory behind.
@@ -284,6 +356,10 @@ def main():
         hidden_layers=config["hidden_layers"],
         history_hidden=config["history_hidden"],
         history_window=config["history_window"],
+        # A plain run's config has none of the fast keys, so train's defaults apply.
+        fast_actor=config.get("fast_actor", False),
+        actor_hands=config.get("actor_hands", FAST_ACTOR_HANDS),
+        actor_devices=tuple(config.get("actor_devices", [DEFAULT_ACTOR_DEVICES])),
     )
 
     # Summary from the log train wrote. The first update's time includes starting the actor

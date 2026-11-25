@@ -37,7 +37,7 @@ import torch
 from evaluate_agents import DEV_SEED_MIN, REPO_ROOT, RESULTS_ROOT, git_state
 from throughput import NET_SEED
 
-from stacker.dmc import EPSILON, choose_action
+from stacker.dmc import EPSILON, batched_choices, choose_action
 from stacker.encode import encode_decision
 from stacker.game import new_hand, play_out
 from stacker.net import QNet, collate_decisions
@@ -167,30 +167,6 @@ def choice_decisions(num_players, seed, count):
         play_out(state, agents, rng)
         hands += 1
     return decisions[:count]
-
-
-def batched_choices(net, decisions, device):
-    """
-    Picks the best legal action for B decisions with one net call: the step a batched actor
-    would take in place of B calls to choose_action (epsilon 0).
-    net: a QNet already on `device`. decisions: list of B encode_decision tuples, any mix of K.
-    device: a torch.device.
-    Returns a list of B ints; entry b is the chosen row of decision b's action_matrix.
-    """
-    # collate_decisions pads every action list to the longest K in the batch.
-    net_inputs = collate_decisions(decisions)
-    on_device = []
-    for tensor in net_inputs:
-        on_device.append(tensor.to(device))
-    action_mask = on_device[4]  # [B, K], True for real actions
-    with torch.no_grad():
-        q_values = net(*on_device)  # [B, K], padded slots hold 0
-    # A padded slot holds 0, which would beat real actions that all score below 0, so it is set
-    # to minus infinity before the argmax. argmax runs along the action axis, one per decision.
-    masked_q = q_values.masked_fill(~action_mask, float("-inf"))
-    # tolist() copies the answers to the CPU, which waits for the GPU to finish: the timing
-    # around this call then covers the whole batch, not just queueing it.
-    return masked_q.argmax(dim=1).tolist()
 
 
 def net_decisions_per_second(net, decisions, batch_size, device, seconds):

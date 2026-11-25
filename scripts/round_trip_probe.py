@@ -26,7 +26,8 @@ spread over the GPUs (--servers-grid, step 13d), and a net in each actor with no
 (--actor-net, gpu_actor_loop, step 13e).
 
 The weight-copy probe (step 13f, decision log 2026-11-25) adds the learner's weight copy to the
-net-in-each-actor design: make_shared_nets builds one net per GPU that the learner writes into.
+net-in-each-actor design: make_shared_nets (in stacker.dmc, shared with training) builds one
+net per GPU that the learner writes into.
 
 Run from the repo root (about 10 minutes with the defaults, on teapot):
     PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14
@@ -61,7 +62,6 @@ from evaluate_agents import DEV_SEED_MIN, RESULTS_ROOT, git_state
 from throughput_ceiling import (
     BUILD_THRESHOLD,
     DECISION_POOL_SIZE,
-    batched_choices,
     choice_decisions,
     parse_sizes,
     untrained_net,
@@ -71,10 +71,15 @@ from stacker.dmc import (
     EPSILON,
     NUM_PLAYERS,
     SAMPLES_PER_UPDATE,
+    batched_choices,
     build_optimizer,
     hand_stream_name,
     learner_step,
+    make_shared_nets,
+    refresh_private_net,
     self_play_hand,
+    shared_net_device,
+    write_weights,
 )
 from stacker.game import new_hand
 from stacker.sealed import config_name
@@ -290,116 +295,6 @@ def fake_actor_loop(
             "wait_seconds": wait_seconds,
         }
     )
-
-
-def make_shared_nets(context, device_names):
-    """
-    Builds the nets the learner writes its weights into: one per device, readable by every
-    process the parent starts (weight-copy probe, step 13f; designs B and C).
-
-    A CUDA tensor passed to a spawned process travels as a handle to the same GPU memory, not
-    as a copy, so a child reading the net sees the learner's later writes. That handle holds
-    only while the process that made the tensor is alive: the parent makes these nets and
-    outlives every child. A CPU net needs share_memory() for the same effect.
-
-    context: the spawn multiprocessing context the run's processes come from.
-    device_names: list of str, one per net, e.g. ["cuda:0", "cuda:1"], or ["cpu", "cpu"] in
-        the laptop tests.
-    Returns (shared_nets, version):
-      shared_nets: list of QNet in eval mode, one per device name, all with the untrained
-        starting weights.
-      version: a shared integer, 0 now; the learner raises it by one after each finished write,
-        so a reader can tell new weights from old.
-    """
-    shared_nets = []
-    for device_name in device_names:
-        net = untrained_net().to(torch.device(device_name))
-        net.eval()
-        if device_name == "cpu":
-            net.share_memory()
-        shared_nets.append(net)
-
-    # "q": a signed 64-bit integer; the Value's own lock lets the learner raise it safely.
-    version = context.Value("q", 0)
-    return shared_nets, version
-
-
-def write_weights(learner_net, shared_nets, version):
-    """
-    Copies the learner's weights into every shared net and times each copy (step 13f).
-
-    The version works as a write flag as well as a counter: it is raised once before the copies
-    (odd: a write is under way) and once after they have finished (even: every shared net holds
-    one whole set of weights). A reader that sees the same even value before and after its own
-    read knows no write overlapped it. So updates written = version // 2.
-
-    learner_net: the learner's QNet, on its own device.
-    shared_nets: list of QNet from make_shared_nets.
-    version: the shared integer from make_shared_nets; even on entry.
-    Returns a list of float, the seconds each shared net's copy took, in shared_nets order.
-    """
-    with version.get_lock():
-        version.value += 1
-
-    copy_seconds = []
-    learner_weights = learner_net.state_dict()
-    for shared_net in shared_nets:
-        copy_start = time.perf_counter()
-        # load_state_dict copies into the shared net's existing tensors, so the memory every
-        # reader holds a handle to is overwritten in place; it never swaps in new tensors.
-        shared_net.load_state_dict(learner_weights)
-        # A GPU copy only queues work; waiting for it makes the time real and makes sure the
-        # weights are in place before the version below says so.
-        if shared_net_device(shared_net).type == "cuda":
-            torch.cuda.synchronize(shared_net_device(shared_net))
-        copy_seconds.append(time.perf_counter() - copy_start)
-
-    with version.get_lock():
-        version.value += 1
-    return copy_seconds
-
-
-def refresh_private_net(private_net, shared_net, version, held_updates, refresh_every):
-    """
-    Design C's actor side (step 13f): copies the shared net into the actor's own net once the
-    learner is refresh_every or more updates ahead of it; otherwise does nothing.
-
-    The copy is kept only if the version was the same even value before and after it (see
-    write_weights): odd means a write was under way, and a changed value means one started
-    during the copy, so either way the copy may mix old and new weights and is made again.
-
-    private_net: the actor's own QNet, on the same device as shared_net.
-    shared_net: the QNet from make_shared_nets for that device.
-    version: the shared integer from make_shared_nets.
-    held_updates: int, how many learner updates private_net's weights include.
-    refresh_every: int >= 1, how many updates the learner may get ahead before a copy.
-    Returns (held_updates, copy_seconds): the updates private_net now includes, and the
-    seconds spent copying, 0.0 when no copy was due.
-    """
-    copy_seconds = 0.0
-    while True:
-        before = version.value
-        # Updates fully written so far; an odd value means the next one is being written.
-        if before // 2 - held_updates < refresh_every:
-            return held_updates, copy_seconds
-        if before % 2 == 1:
-            continue
-
-        copy_start = time.perf_counter()
-        private_net.load_state_dict(shared_net.state_dict())
-        # Wait for the copy to finish before reading the version again, or a write that started
-        # after the copy was queued could go unseen.
-        if shared_net_device(shared_net).type == "cuda":
-            torch.cuda.synchronize(shared_net_device(shared_net))
-        copy_seconds += time.perf_counter() - copy_start
-
-        if version.value == before:
-            return before // 2, copy_seconds
-
-
-def shared_net_device(net):
-    """The device a net's weights live on."""
-    return next(net.parameters()).device
 
 
 def gpu_actor_loop(
@@ -872,7 +767,9 @@ def run_setting(
                 shared_device_names.append(f"{device_name}:{gpu}")
         else:
             shared_device_names.append(device_name)
-        shared_nets, version = make_shared_nets(context, shared_device_names)
+        shared_nets, version = make_shared_nets(
+            context, shared_device_names, untrained_net()
+        )
 
     processes = []
     if learner_on:

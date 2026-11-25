@@ -2,7 +2,8 @@
 Mutation check of the DMC loop's, the checkpoint evaluation's and the stage 5 arms' gates
 (stage plan specialist_explore, stage 4 pieces 2 and 9; stage 5 piece 9b: net sizes, run
 settings, net against net, the arm rule and the arm plots; actor-throughput piece 1b: the
-round-trip probe).
+round-trip probe; the fast actor's build, piece P7: batched picks, lockstep hands, the fast
+actor process, the fast path in train and its flags).
 
 A gate is only worth trusting if it goes red when the code is wrong. This script plants one
 known bug at a time in a copy of the code, runs the gate files against the copy, and records
@@ -17,8 +18,9 @@ on the CPU too, so the device bugs are planted only where there is a CUDA GPU (t
 Run from the repo root (about half an hour: each of ~40 runs takes ~40 s):
     PYTHONPATH=src .venv/bin/python scripts/mutation_check.py
 Output: a table on screen, and under results/specialist_explore/ the file
-mutation_check_arms.json (machine without a GPU) or mutation_check_arms_cuda.json (with one).
-Stage 4's record is mutation_check_dmc*.json, from that stage's commit; it is not overwritten.
+mutation_check_fast_actor.json (machine without a GPU) or mutation_check_fast_actor_cuda.json
+(with one). The earlier records, mutation_check_dmc*.json (stage 4) and mutation_check_arms*.json
+(stage 5 before the fast actor), are from their own commits and are not overwritten.
 """
 
 import json
@@ -59,7 +61,7 @@ GATES_FILES = (
 GATES_TIMEOUT_SECONDS = 600
 RESULTS_DIR = REPO_ROOT / "results" / "specialist_explore"
 # The result file's name without its ending; "_cuda" is added on a machine with a GPU.
-RESULTS_STEM = "mutation_check_arms"
+RESULTS_STEM = "mutation_check_fast_actor"
 
 DMC = "src/stacker/dmc.py"
 NET = "src/stacker/net.py"
@@ -90,8 +92,9 @@ MUTATIONS = (
     (
         "forced turn calls the net",
         DMC,
-        "if num_actions == 1:",
-        "if num_actions == 0:",
+        # Four spaces of indent: choose_action's line, not the batched pick's.
+        "\n    if num_actions == 1:",
+        "\n    if num_actions == 0:",
     ),
     (
         "greedy pick takes the lowest Q",
@@ -132,7 +135,8 @@ MUTATIONS = (
     (
         "weights never copied to the actors",
         DMC,
-        "\n                actor_net.load_state_dict(q_net.state_dict())\n",
+        # Twenty spaces: the old path's copy after each update, not the fast path's checkpoint.
+        "\n                    actor_net.load_state_dict(q_net.state_dict())\n",
         "\n",
     ),
     (
@@ -346,19 +350,19 @@ MUTATIONS = (
     ),
     (
         "learner never writes the second GPU's shared net",
-        ROUND_TRIP_SCRIPT,
+        DMC,
         "    for shared_net in shared_nets:\n        copy_start = time.perf_counter()",
         "    for shared_net in shared_nets[:1]:\n        copy_start = time.perf_counter()",
     ),
     (
         "actor never refreshes its own net",
-        ROUND_TRIP_SCRIPT,
+        DMC,
         "        private_net.load_state_dict(shared_net.state_dict())\n",
         "        shared_net.state_dict()\n",
     ),
     (
         "refresh keeps a copy a write overlapped",
-        ROUND_TRIP_SCRIPT,
+        DMC,
         "        if version.value == before:\n",
         "        if True:\n",
     ),
@@ -367,6 +371,75 @@ MUTATIONS = (
         ROUND_TRIP_SCRIPT,
         "cap = learner_cap / learner_slowdown",
         "cap = learner_cap",
+    ),
+)
+
+# The fast actor's build (P7): one bug per gate it added.
+FAST_ACTOR_MUTATIONS = (
+    (
+        "batched pick loses the padding mask",
+        DMC,
+        '    masked_q = q_values.masked_fill(~action_mask, float("-inf"))\n',
+        "    masked_q = q_values\n",
+    ),
+    (
+        "batched pick draws on a forced turn",
+        DMC,
+        "        if num_actions == 1:\n            choices.append(0)\n",
+        "        if num_actions == 1:\n            rng.random()\n            choices.append(0)\n",
+    ),
+    (
+        "batched greedy answers in reverse order",
+        DMC,
+        "            choices[greedy_positions[index]] = greedy_choices[index]",
+        "            choices[greedy_positions[index]] = greedy_choices[-1 - index]",
+    ),
+    (
+        "lockstep records all land in the first slot",
+        DMC,
+        "        slot.records.append(",
+        "        playing_slots[0].records.append(",
+    ),
+    (
+        "fast actor reuses a hand index on refill",
+        DMC,
+        "                slots[position] = deal_slot(seed, actor_id, next_hand_index)\n"
+        "                next_hand_index += 1\n",
+        "                slots[position] = deal_slot(seed, actor_id, next_hand_index)\n",
+    ),
+    (
+        "fast actor's stream leaves out the actor id",
+        DMC,
+        "    rng = random.Random(hand_stream_name(seed, actor_id, hand_index))\n"
+        "    return HandSlot",
+        "    rng = random.Random(hand_stream_name(seed, 0, hand_index))\n    return HandSlot",
+    ),
+    (
+        "fast actor never refreshes",
+        DMC,
+        "        held_updates, _ = refresh_private_net(\n"
+        "            own_net, shared_net, version, held_updates, FAST_ACTOR_REFRESH_EVERY\n"
+        "        )\n",
+        "        held_updates = 0\n",
+    ),
+    (
+        "fast path never writes the shared nets",
+        DMC,
+        "                    write_weights(q_net, shared_nets, version)\n",
+        "                    pass\n",
+    ),
+    (
+        "fast checkpoint misses the learner's latest weights",
+        DMC,
+        "                    if fast_actor:\n"
+        "                        actor_net.load_state_dict(q_net.state_dict())\n",
+        "",
+    ),
+    (
+        "plain run writes fast_actor false",
+        TRAIN_SCRIPT,
+        "        return {}, set()\n",
+        '        return {"fast_actor": False}, set()\n',
     ),
 )
 
@@ -396,6 +469,12 @@ CUDA_MUTATIONS = (
         'actor_net.state_dict(), run_dir / f"checkpoint_{updates_done:06d}.pt"',
         'q_net.state_dict(), run_dir / f"checkpoint_{updates_done:06d}.pt"',
     ),
+    (
+        "fast actor's net left where its copy was made",
+        DMC,
+        "    own_net = copy.deepcopy(shared_net).to(device)\n",
+        "    own_net = copy.deepcopy(shared_net)\n",
+    ),
 )
 
 # Planted only where there is no CUDA GPU: with one, --device cuda is valid and its gate is
@@ -417,6 +496,8 @@ def main():
     # The first run plants nothing. It must be all green, or a red gate later proves nothing.
     runs = [("baseline (no bug)", None, None, None)]
     for mutation in MUTATIONS:
+        runs.append(mutation)
+    for mutation in FAST_ACTOR_MUTATIONS:
         runs.append(mutation)
 
     # The bugs that only show on this kind of machine are planted; the others are named in the

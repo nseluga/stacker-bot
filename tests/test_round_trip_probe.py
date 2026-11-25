@@ -142,7 +142,7 @@ def test_write_reaches_every_shared_net():
     # with stale weights forever), a write into new tensors instead of the shared ones (the
     # actors' handles would miss it), and the version not left even and raised per write.
     shared_nets, version = round_trip_probe.make_shared_nets(
-        multiprocessing.get_context("spawn"), TWO_DEVICES
+        multiprocessing.get_context("spawn"), TWO_DEVICES, throughput_ceiling.untrained_net()
     )
     handles = []
     for shared_net in shared_nets:
@@ -161,7 +161,7 @@ def test_refresh_follows_its_schedule():
     # catches: refresh_every ignored (a copy at every update), a refresh that never copies, and
     # a lag that grows past refresh_every.
     shared_nets, version = round_trip_probe.make_shared_nets(
-        multiprocessing.get_context("spawn"), ["cpu"]
+        multiprocessing.get_context("spawn"), ["cpu"], throughput_ceiling.untrained_net()
     )
     learner = throughput_ceiling.untrained_net()
     private_net = throughput_ceiling.untrained_net()
@@ -189,7 +189,7 @@ def test_refresh_redoes_a_copy_a_write_overlapped():
     # catches: a copy kept although a write landed during it (it may mix old and new weights),
     # and the held updates taken from the version before the copy instead of after.
     shared_nets, version = round_trip_probe.make_shared_nets(
-        multiprocessing.get_context("spawn"), ["cpu"]
+        multiprocessing.get_context("spawn"), ["cpu"], throughput_ceiling.untrained_net()
     )
     shared_net = shared_nets[0]
     learner = shifted_learner()

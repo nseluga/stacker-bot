@@ -27,6 +27,7 @@ every checkpoint is held on the CPU.
 Seeds start at 10: seeds 0-2 are kept for confirm runs.
 """
 
+import argparse
 import json
 import math
 import os
@@ -49,18 +50,24 @@ import train_dmc  # noqa: E402
 
 from stacker.dmc import (
     EPSILON,
+    FAST_ACTOR_HANDS,
     LEARNING_RATE,
     MAX_GRAD_NORM,
     NUM_PLAYERS,
     RMSPROP_ALPHA,
     RMSPROP_EPS,
     RMSPROP_MOMENTUM,
+    HandSlot,
     actor_loop,
+    advance_slots,
     build_optimizer,
     choose_action,
+    choose_actions_batched,
     collate_samples,
+    fast_actor_loop,
     hand_stream_name,
     learner_step,
+    make_shared_nets,
     self_play_hand,
     shuffle_returns,
     train,
@@ -69,6 +76,31 @@ from stacker.dmc import (
 from stacker.encode import ACTION_DIM, HISTORY_WINDOW, MOVE_DIM, STATE_DIM, encode_action
 from stacker.game import HandState, new_hand
 from stacker.net import QNet
+
+# Batched-pick gate: copies of one dev hand's decisions, each copy with its own rngs, so the
+# pool is large enough that both explore and greedy picks happen at epsilon 0.3. Pairs of
+# decisions share an rng, as the decisions of one hand do across passes.
+BATCHED_POOL_COPIES = 4
+BATCHED_EPSILON = 0.3
+DECISIONS_PER_RNG = 2
+# Every real Q pushed far below 0, so a padded slot (Q 0) wins the argmax if the mask is lost.
+NEGATIVE_BIAS = -100.0
+
+# Lockstep gate: 8 hands of one actor's stream, at the batched gate's epsilon so both explore
+# and greedy picks happen.
+LOCKSTEP_HANDS = 8
+LOCKSTEP_SEED = 10
+LOCKSTEP_ACTOR = 0
+
+# Fast-actor gate: two real actor processes on the CPU, a few slots each, read until 24 hands.
+FAST_GATE_ACTORS = 2
+FAST_GATE_HANDS = 4
+FAST_GATE_ITEMS = 24
+FAST_GATE_TIMEOUT_SECONDS = 60
+
+# Fast-run gate: enough updates that an actor stuck on update 0 lags by far more than a
+# working one, whose lag is bounded by the hands waiting in the queue.
+FAST_RUN_UPDATES = 20
 
 # A rate that is not the control's 1e-4, so a rate that build_optimizer drops shows up.
 ARM_LEARNING_RATE = 3e-4
@@ -324,6 +356,211 @@ def test_epsilon_one_picks_every_action_about_equally():
         counts[index] += 1
     for count in counts:
         assert UNIFORM_COUNT_LOW <= count <= UNIFORM_COUNT_HIGH
+
+
+def test_batched_picks_equal_choose_action():
+    # catches: a padded slot winning the argmax (mask lost), an extra or missing rng draw (a
+    # draw on a forced turn, the explore draw skipped), and answers put back at the wrong place.
+    one_hand = real_decisions(NUM_PLAYERS)
+    decisions = []
+    for _ in range(BATCHED_POOL_COPIES):
+        decisions.extend(one_hand)
+    action_counts = set()
+    for decision in decisions:
+        action_counts.add(len(decision[3]))
+    # Forced turns and more than one K with a choice: otherwise a branch goes untested.
+    assert 1 in action_counts
+    assert len(action_counts) > 2
+
+    net = seeded_net()
+    with torch.no_grad():
+        net.mlp[-1].bias.fill_(NEGATIVE_BIAS)
+
+    # Two identical sets of rngs: one for the batched call, one for choose_action.
+    batched_rngs = []
+    alone_rngs = []
+    for position in range(len(decisions)):
+        name = f"batched-pick:{position // DECISIONS_PER_RNG}"
+        if position % DECISIONS_PER_RNG == 0:
+            batched_rngs.append(random.Random(name))
+            alone_rngs.append(random.Random(name))
+        else:
+            batched_rngs.append(batched_rngs[-1])
+            alone_rngs.append(alone_rngs[-1])
+
+    batched = choose_actions_batched(
+        net, decisions, BATCHED_EPSILON, batched_rngs, torch.device("cpu")
+    )
+    alone = []
+    for position in range(len(decisions)):
+        alone.append(
+            choose_action(net, decisions[position], BATCHED_EPSILON, alone_rngs[position])
+        )
+
+    assert batched == alone
+    # Each rng ends where choose_action leaves it: the hand's next draws are unchanged.
+    for position in range(len(decisions)):
+        assert batched_rngs[position].getstate() == alone_rngs[position].getstate()
+
+
+@needs_cuda
+def test_lockstep_hands_on_gpu_equal_cpu_hands():
+    # catches: the GPU's float math flipping a near-tie argmax, so a fast actor's hand on the
+    # GPU is no longer the hand self_play_hand plays on the CPU from the same stream.
+    cpu_net = seeded_net()
+    gpu_net = seeded_net().to("cuda")
+    slots = []
+    for hand_index in range(LOCKSTEP_HANDS):
+        rng = random.Random(hand_stream_name(LOCKSTEP_SEED, LOCKSTEP_ACTOR, hand_index))
+        slots.append(HandSlot(hand_index, rng, new_hand(NUM_PLAYERS, rng)))
+
+    gpu_traces = {}
+    while len(gpu_traces) < LOCKSTEP_HANDS:
+        finished = advance_slots(
+            slots, gpu_net, BATCHED_EPSILON, HISTORY_WINDOW, torch.device("cuda")
+        )
+        for slot, _ in finished:
+            gpu_traces[slot.hand_index] = slot.trace
+
+    for hand_index in range(LOCKSTEP_HANDS):
+        rng = random.Random(hand_stream_name(LOCKSTEP_SEED, LOCKSTEP_ACTOR, hand_index))
+        _, cpu_trace = self_play_hand(new_hand(NUM_PLAYERS, rng), cpu_net, BATCHED_EPSILON, rng)
+        assert gpu_traces[hand_index] == cpu_trace
+
+
+def test_lockstep_hands_equal_self_play_hand():
+    # catches: one hand's records landing in another (cross-talk), a decision given the wrong
+    # seat's score, decisions out of order, and a hand that never finishes or finishes twice.
+    net = seeded_net()
+    device = torch.device("cpu")
+    slots = []
+    for hand_index in range(LOCKSTEP_HANDS):
+        rng = random.Random(hand_stream_name(LOCKSTEP_SEED, LOCKSTEP_ACTOR, hand_index))
+        slots.append(HandSlot(hand_index, rng, new_hand(NUM_PLAYERS, rng)))
+
+    # Passes until every hand is over; each finished hand is kept by its hand index.
+    finished_by_hand = {}
+    while len(finished_by_hand) < LOCKSTEP_HANDS:
+        finished = advance_slots(slots, net, BATCHED_EPSILON, HISTORY_WINDOW, device)
+        # A pass with every hand already over would loop forever: some hand must be in play.
+        assert len(finished) > 0 or any_in_play(slots)
+        for slot, samples in finished:
+            assert slot.hand_index not in finished_by_hand
+            finished_by_hand[slot.hand_index] = (slot.trace, samples)
+
+    for hand_index in range(LOCKSTEP_HANDS):
+        rng = random.Random(hand_stream_name(LOCKSTEP_SEED, LOCKSTEP_ACTOR, hand_index))
+        expected_samples, expected_trace = self_play_hand(
+            new_hand(NUM_PLAYERS, rng), net, BATCHED_EPSILON, rng
+        )
+        trace, samples = finished_by_hand[hand_index]
+        assert trace == expected_trace
+        assert len(samples) == len(expected_samples)
+        for sample, expected in zip(samples, expected_samples):
+            # The four arrays exactly equal, then the return.
+            for part in range(4):
+                assert np.array_equal(sample[part], expected[part])
+            assert sample[4] == expected[4]
+
+
+def any_in_play(slots):
+    """True if some slot's hand still has a seat to act."""
+    for slot in slots:
+        if slot.state.turn is not None:
+            return True
+    return False
+
+
+def test_fast_actor_plays_its_own_streams():
+    # catches: a hand index reused when a slot refills, two actors playing the same deal (the
+    # actor id missing from the stream), an actor scoring with weights other than the shared
+    # net's, and the queue item packed in the wrong order.
+    net = seeded_net()
+    context = torch.multiprocessing.get_context("spawn")
+    device_names = []
+    for _ in range(FAST_GATE_ACTORS):
+        device_names.append("cpu")
+    shared_nets, version = make_shared_nets(context, device_names, net)
+    sample_queue = context.Queue()
+
+    actors = []
+    for actor_id in range(FAST_GATE_ACTORS):
+        actor = context.Process(
+            target=fast_actor_loop,
+            args=(
+                actor_id,
+                LOCKSTEP_SEED,
+                "cpu",
+                shared_nets[actor_id],
+                version,
+                sample_queue,
+                BATCHED_EPSILON,
+                HISTORY_WINDOW,
+                FAST_GATE_HANDS,
+            ),
+            daemon=True,
+        )
+        actor.start()
+        actors.append(actor)
+    items = []
+    try:
+        for _ in range(FAST_GATE_ITEMS):
+            items.append(sample_queue.get(timeout=FAST_GATE_TIMEOUT_SECONDS))
+    finally:
+        for actor in actors:
+            actor.terminate()
+        for actor in actors:
+            actor.join()
+
+    seen = set()
+    actors_seen = set()
+    for actor_id, hand_index, held_updates, samples in items:
+        assert (actor_id, hand_index) not in seen
+        seen.add((actor_id, hand_index))
+        actors_seen.add(actor_id)
+        # No learner ran, so the version stayed 0 and the first refresh took update 0.
+        assert held_updates == 0
+        rng = random.Random(hand_stream_name(LOCKSTEP_SEED, actor_id, hand_index))
+        expected, _ = self_play_hand(new_hand(NUM_PLAYERS, rng), net, BATCHED_EPSILON, rng)
+        assert samples_equal(samples, expected)
+    assert actors_seen == set(range(FAST_GATE_ACTORS))
+
+
+def test_fast_actor_run_learns_from_fresh_weights(tmp_path):
+    # catches: the actors' refresh skipped or write_weights never called (held_updates stays 0,
+    # so the lag on the last update is the whole run), an actor given a net index past the
+    # shared nets, and a checkpoint saved from weights older than the learner's.
+    q_net, actor_net = train(
+        DEV_SEED,
+        SMOKE_ACTORS,
+        tmp_path,
+        FAST_RUN_UPDATES,
+        samples_per_update=SMOKE_SAMPLES_PER_UPDATE,
+        checkpoint_every=FAST_RUN_UPDATES,
+        fast_actor=True,
+        actor_hands=FAST_GATE_HANDS,
+        actor_devices=("cpu", "cpu"),
+    )
+
+    log_lines = []
+    with open(tmp_path / "log.jsonl") as log_file:
+        for line in log_file:
+            log_lines.append(json.loads(line))
+    assert len(log_lines) == FAST_RUN_UPDATES
+    for log_line in log_lines:
+        assert math.isfinite(log_line["loss"])
+        # A hand cannot hold weights newer than the learner's.
+        assert log_line["actor_lag_max"] >= 0
+
+    # Before the last update the learner had made FAST_RUN_UPDATES - 1 updates; an actor that
+    # never took new weights would lag by exactly that on every hand.
+    assert log_lines[-1]["actor_lag_mean"] < FAST_RUN_UPDATES - 1
+
+    # The last checkpoint holds the learner's final weights.
+    checkpoint = torch.load(tmp_path / f"checkpoint_{FAST_RUN_UPDATES:06d}.pt")
+    learner_weights = q_net.state_dict()
+    for name in learner_weights:
+        assert torch.equal(checkpoint[name], learner_weights[name].cpu())
 
 
 def test_scripted_hand_gives_each_decision_its_own_seats_score():
@@ -591,9 +828,13 @@ def test_actor_plays_the_hands_its_stream_names():
                 actor_loop(actor_id, DEV_SEED, q_net, sample_queue, 0.0, HISTORY_WINDOW)
 
             hands = []
-            for queued_actor_id, samples in sample_queue.items:
-                # Each queued item is labelled with the actor that played it.
+            for item_index in range(len(sample_queue.items)):
+                queued_actor_id, hand_index, held_updates, samples = sample_queue.items[item_index]
+                # Each queued item is labelled with the actor and the hand number that played
+                # it; the old actor holds no copy of the weights, so it has no version.
                 assert queued_actor_id == actor_id
+                assert hand_index == item_index
+                assert held_updates is None
                 hands.append(samples)
             assert len(hands) == STREAM_GATE_HANDS
             hands_by_actor.append(hands)
@@ -719,6 +960,9 @@ def test_two_actors_feed_the_learner(tmp_path):
     for count in samples_by_actor:
         assert count > 0
     assert sum(samples_by_actor) >= SMOKE_UPDATES * SMOKE_SAMPLES_PER_UPDATE
+    # The old actors play on the shared net itself, so no lag is measured.
+    assert log_lines[-1]["actor_lag_mean"] is None
+    assert log_lines[-1]["actor_lag_max"] is None
 
     # Equation 12: after the last update the actors' net holds the learner's weights.
     learner_weights = q_net.state_dict()
@@ -968,3 +1212,41 @@ def test_gpu_run_keeps_actors_and_checkpoints_on_the_cpu(tmp_path):
     # The last checkpoint holds the learner's weights. saved_weights is the last one loaded.
     for name in learner_weights:
         assert torch.equal(saved_weights[name], learner_weights[name].cpu()), name
+
+
+def fast_flags(fast_actor, actor_hands=None, actor_devices=None):
+    """The fast-actor part of a parsed train_dmc command line."""
+    return argparse.Namespace(
+        fast_actor=fast_actor, actor_hands=actor_hands, actor_devices=actor_devices
+    )
+
+
+def test_plain_arm_passes_against_a_base_made_before_the_fast_actor():
+    # catches: a plain run writing fast_actor false, which a base with no such key would refuse.
+    base_config = {"seed": 20, "actors": 24, "width": 512}
+    entries, named_keys = train_dmc.fast_actor_settings(fast_flags(False))
+    arm_config = {"seed": 20, "actors": 24, "width": 256}
+    arm_config.update(entries)
+    assert train_dmc.check_against_base(arm_config, base_config, {"width"} | named_keys) is None
+
+
+def test_fast_actor_names_its_own_keys():
+    # catches: --fast-actor not naming its keys (its default hands and devices refused), and
+    # the guard going slack on a fast key that nothing named.
+    base_config = {"seed": 20, "actors": 24}
+    entries, named_keys = train_dmc.fast_actor_settings(fast_flags(True))
+    fast_config = {"seed": 20, "actors": 16}
+    fast_config.update(entries)
+    assert fast_config["actor_hands"] == FAST_ACTOR_HANDS
+    assert fast_config["actor_devices"] == ["cpu"]
+    assert train_dmc.check_against_base(fast_config, base_config, {"actors"} | named_keys) is None
+
+    with pytest.raises(SystemExit) as refusal:
+        train_dmc.check_against_base(fast_config, base_config, {"actors"})
+    assert "actor_hands" in str(refusal.value)
+
+
+def test_actor_flags_need_fast_actor():
+    # catches: --actor-hands given without --fast-actor and silently ignored by train.
+    with pytest.raises(SystemExit):
+        train_dmc.fast_actor_settings(fast_flags(False, actor_hands=8))
