@@ -2,7 +2,8 @@
   "run": "4p1d_dmc_teapot_a24_u18750_seed20",
   "fields": [
     "random",
-    "greedy"
+    "greedy",
+    "heuristic"
   ],
   "deals": 1000,
   "seed": 22,
@@ -28,9 +29,9 @@
     17500,
     18750
   ],
-  "workers": 32,
-  "total_seconds": 211.58,
-  "git_commit": "7a4a9d56ef7b0fae88bc0dd1184b288431f51ba5",
+  "workers": 48,
+  "total_seconds": 973.7,
+  "git_commit": "1ee216de10eadd4b99ea751d4e5410f32bd76e33",
   "uncommitted_changes": false,
   "run_git_commit": "7a4a9d56ef7b0fae88bc0dd1184b288431f51ba5",
   "run_uncommitted_changes": false

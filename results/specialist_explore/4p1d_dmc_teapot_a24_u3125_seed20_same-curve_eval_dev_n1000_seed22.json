@@ -1,0 +1,47 @@
+{
+  "run": "4p1d_dmc_teapot_a24_u3125_seed20_same-curve",
+  "fields": [
+    "random",
+    "greedy"
+  ],
+  "deals": 1000,
+  "seed": 22,
+  "source": "dev",
+  "test_seats": [
+    0
+  ],
+  "checkpoints": [
+    0,
+    125,
+    250,
+    375,
+    500,
+    625,
+    750,
+    875,
+    1000,
+    1125,
+    1250,
+    1375,
+    1500,
+    1625,
+    1750,
+    1875,
+    2000,
+    2125,
+    2250,
+    2375,
+    2500,
+    2625,
+    2750,
+    2875,
+    3000,
+    3125
+  ],
+  "workers": 48,
+  "total_seconds": 437.96,
+  "git_commit": "1ee216de10eadd4b99ea751d4e5410f32bd76e33",
+  "uncommitted_changes": false,
+  "run_git_commit": "1ee216de10eadd4b99ea751d4e5410f32bd76e33",
+  "run_uncommitted_changes": false
+}

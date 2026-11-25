@@ -1,0 +1,26 @@
+{
+  "run": "4p1d_dmc_teapot_a24_u93750_seed20",
+  "reference": "4p1d_dmc_teapot_a24_u18750_seed20",
+  "matched": 32,
+  "misses": [
+    {
+      "checkpoint": 13750,
+      "field": "greedy",
+      "mean": 0.743,
+      "ci_low": 0.69675,
+      "ci_high": 0.739,
+      "distance": 0.0040000000000000036
+    },
+    {
+      "checkpoint": 16250,
+      "field": "greedy",
+      "mean": 0.80125,
+      "ci_low": 0.73325,
+      "ci_high": 0.774,
+      "distance": 0.027249999999999996
+    }
+  ],
+  "verdict": "fail",
+  "git_commit": "1ee216de10eadd4b99ea751d4e5410f32bd76e33",
+  "uncommitted_changes": false
+}

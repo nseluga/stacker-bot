@@ -1,0 +1,9 @@
+{
+  "run": "4p1d_dmc_teapot_a24_u3125_seed20_same-curve",
+  "reference": "4p1d_dmc_teapot_a24_u3125_seed20",
+  "matched": 26,
+  "misses": [],
+  "verdict": "pass",
+  "git_commit": "1ee216de10eadd4b99ea751d4e5410f32bd76e33",
+  "uncommitted_changes": false
+}

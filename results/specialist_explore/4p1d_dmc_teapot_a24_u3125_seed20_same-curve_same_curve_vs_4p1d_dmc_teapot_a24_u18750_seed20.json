@@ -1,0 +1,18 @@
+{
+  "run": "4p1d_dmc_teapot_a24_u3125_seed20_same-curve",
+  "reference": "4p1d_dmc_teapot_a24_u18750_seed20",
+  "matched": 6,
+  "misses": [
+    {
+      "checkpoint": 2500,
+      "field": "greedy",
+      "mean": 0.55075,
+      "ci_low": 0.49850000000000005,
+      "ci_high": 0.5425,
+      "distance": 0.00824999999999998
+    }
+  ],
+  "verdict": "fail",
+  "git_commit": "1ee216de10eadd4b99ea751d4e5410f32bd76e33",
+  "uncommitted_changes": false
+}
