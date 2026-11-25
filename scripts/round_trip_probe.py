@@ -429,6 +429,34 @@ def percentile(sorted_values, fraction):
     return sorted_values[int(fraction * (len(sorted_values) - 1))]
 
 
+def combine_server_results(server_results):
+    """
+    Merges the servers' end-of-run dicts into one of the same shape, as if one server had
+    done all their work: batch_sizes joined, every count and every seconds total summed.
+    server_results: list of server_loop result dicts, one per server.
+    Returns that dict plus servers_used, the number of servers that scored at least one
+    request while measuring (fewer than started means some servers got no actors' requests).
+    """
+    summed_fields = [
+        "messages_received",
+        "requests_received",
+        "drained_requests",
+        "drain_seconds",
+        "net_seconds",
+        "reply_seconds",
+    ]
+    combined = {"batch_sizes": [], "servers_used": 0}
+    for field in summed_fields:
+        combined[field] = 0
+    for result in server_results:
+        combined["batch_sizes"].extend(result["batch_sizes"])
+        for field in summed_fields:
+            combined[field] += result[field]
+        if result["requests_received"] > 0:
+            combined["servers_used"] += 1
+    return combined
+
+
 def run_setting(
     num_actors,
     hands,
@@ -442,12 +470,14 @@ def run_setting(
     measure_seconds,
     record_answers,
     bulk,
+    num_servers=1,
+    num_gpus=1,
 ):
     """
     Runs one setting with real processes and returns its rates.
 
-    Processes: num_actors fake actors; one server if there are actors with choice turns
-    (choice_share > 0); one dummy learner if learner_on. So the same function gives
+    Processes: num_actors fake actors; num_servers servers if there are actors with choice
+    turns (choice_share > 0); one dummy learner if learner_on. So the same function gives
     - today's baseline: choice_share 0, kept_seconds = today's whole cost per decision;
     - a grid setting: choice_share and kept_seconds from the split, with a server;
     - the learner alone: num_actors 0, learner_on.
@@ -456,17 +486,26 @@ def run_setting(
 
     decisions: the pool, as in fake_actor_loop. seed: dev seed; actor i seeds its draws with
     seed + i, the learner names its hand streams with seed. bulk: as in fake_actor_loop.
+    num_servers: N; actor a sends to server a % N, through that server's own request queue,
+    so no two servers take each other's requests. Each server holds every actor's reply
+    queue and indexes it by the global actor id carried in each message, so its replies
+    reach the actor that asked.
+    num_gpus: G; server s runs on device_name:{s % G}. The learner stays on device_name, which
+    for "cuda" is GPU 0. G must be 1 on the CPU.
     Returns a dict: the inputs, measured_seconds, decisions_per_second, the median and p90
     round trip in microseconds (it includes the time an answer waits for its actor to finish
-    another hand), mean_batch, server_busy_share (net plus reply, as in the per-request run),
-    the server's split (drain and reply microseconds per request, net share, requests per
-    message), the actors' split (spin, wait and other shares of their time),
+    another hand), servers_used, mean_batch over every server's calls, server_busy_share (net
+    plus reply, as in the per-request run), the servers' split (drain and reply microseconds
+    per request, net share, requests per message; shares are of all servers' time together,
+    so 1.0 means every server busy all the time), the actors' split (spin, wait and other shares of their time),
     learner_updates_per_second, and answers (one list per actor, filled only if
     record_answers).
     """
     # spawn, as train uses: a forked child would inherit torch's threads mid-state.
     context = multiprocessing.get_context("spawn")
-    request_queue = context.Queue()
+    request_queues = []
+    for server_id in range(num_servers):
+        request_queues.append(context.Queue())
     result_queue = context.Queue()
     measure_event = context.Event()
     stop_event = context.Event()
@@ -489,15 +528,21 @@ def run_setting(
     server_on = False
     if num_actors > 0 and choice_share > 0:
         server_on = True
-        server = context.Process(
-            target=server_loop,
-            args=(
-                request_queue, reply_queues, device_name, measure_event, stop_event, result_queue,
-                bulk,
-            ),
-        )
-        server.start()
-        processes.append(server)
+        for server_id in range(num_servers):
+            # Spread the servers over the GPUs in turn: with 4 servers on 2 GPUs, servers 0
+            # and 2 share GPU 0. One GPU keeps the bare name, as the one-server run did.
+            server_device = device_name
+            if num_gpus > 1:
+                server_device = f"{device_name}:{server_id % num_gpus}"
+            server = context.Process(
+                target=server_loop,
+                args=(
+                    request_queues[server_id], reply_queues, server_device, measure_event,
+                    stop_event, result_queue, bulk,
+                ),
+            )
+            server.start()
+            processes.append(server)
 
     for actor_id in range(num_actors):
         actor = context.Process(
@@ -509,7 +554,7 @@ def run_setting(
                 kept_seconds,
                 choice_share,
                 seed + actor_id,
-                request_queue,
+                request_queues[actor_id % num_servers],
                 reply_queues[actor_id],
                 measure_event,
                 stop_event,
@@ -534,7 +579,7 @@ def run_setting(
     # Results are read before joining: a child that has put data on a queue cannot exit until
     # that data is read, so joining first would wait forever.
     actor_results = []
-    server_result = None
+    server_results = []
     learner_result = None
     result_timeout = warmup_seconds + measure_seconds + RESULT_SLACK_SECONDS
     for _ in range(len(processes)):
@@ -547,7 +592,7 @@ def run_setting(
         if "actor_id" in result:
             actor_results.append(result)
         elif "batch_sizes" in result:
-            server_result = result
+            server_results.append(result)
         else:
             learner_result = result
     for process in processes:
@@ -568,6 +613,11 @@ def run_setting(
         total_spin_seconds += result["spin_seconds"]
         total_wait_seconds += result["wait_seconds"]
     round_trips.sort()
+    # The servers' work is summed; their time shares are over all servers' time together.
+    server_result = None
+    server_seconds = len(server_results) * measured_seconds
+    if server_results:
+        server_result = combine_server_results(server_results)
 
     summary = {
         "num_actors": num_actors,
@@ -580,6 +630,9 @@ def run_setting(
         "seed": seed,
         "warmup_seconds": warmup_seconds,
         "bulk": bulk,
+        "num_servers": num_servers,
+        "num_gpus": num_gpus,
+        "servers_used": None,
         "measured_seconds": measured_seconds,
         "decisions_per_second": total_decisions / measured_seconds,
         "round_trip_incl_actor_wait_median_us": None,
@@ -605,11 +658,12 @@ def run_setting(
         )
     if server_result is not None and server_result["batch_sizes"]:
         batch_sizes = server_result["batch_sizes"]
+        summary["servers_used"] = server_result["servers_used"]
         summary["mean_batch"] = sum(batch_sizes) / len(batch_sizes)
         summary["server_busy_share"] = (
             server_result["net_seconds"] + server_result["reply_seconds"]
-        ) / measured_seconds
-        summary["server_net_share"] = server_result["net_seconds"] / measured_seconds
+        ) / server_seconds
+        summary["server_net_share"] = server_result["net_seconds"] / server_seconds
         summary["server_reply_us_per_request"] = (
             server_result["reply_seconds"] / server_result["requests_received"]
         ) * MICROSECONDS_PER_SECOND
@@ -665,6 +719,11 @@ def main():
     parser.add_argument(
         "--bulk", action="store_true", help="one message per actor pass, not per choice turn"
     )
+    parser.add_argument(
+        "--servers-grid",
+        default=None,
+        help="servers:GPUs pairs, comma list (e.g. 1:1,2:2,2:1,4:2,8:2); learner-on rows only",
+    )
     args = parser.parse_args()
     if args.seed < DEV_SEED_MIN:
         raise SystemExit(
@@ -696,12 +755,28 @@ def main():
     if cores_short:
         print("warning: fewer cores than processes; rates will read low")
 
+    # The servers grid: each "servers:GPUs" pair becomes (servers, GPUs). Without it, every
+    # row has one server on one GPU, as the earlier round-trip runs had.
+    server_settings = [(1, 1)]
+    if args.servers_grid is not None:
+        server_settings = []
+        for pair in args.servers_grid.split(","):
+            servers_text, gpus_text = pair.split(":")
+            server_settings.append((int(servers_text), int(gpus_text)))
+    # Check the GPU counts before any run starts, not halfway through the grid.
+    gpus_available = 1
+    if args.device.startswith("cuda"):
+        gpus_available = torch.cuda.device_count()
+    for num_servers, num_gpus in server_settings:
+        if num_gpus > gpus_available:
+            raise SystemExit(f"{num_gpus} GPUs asked for, {gpus_available} available")
+
     decisions = choice_decisions(args.players, args.seed, DECISION_POOL_SIZE)
 
-    def run(num_actors, hands, learner_on, kept, share, bulk):
+    def run(num_actors, hands, learner_on, kept, share, bulk, num_servers=1, num_gpus=1):
         return run_setting(
             num_actors, hands, learner_on, decisions, kept, share, args.device, args.seed,
-            args.warmup, args.seconds, False, bulk,
+            args.warmup, args.seconds, False, bulk, num_servers, num_gpus,
         )
 
     def add_speedups(row, learner_on):
@@ -741,24 +816,41 @@ def main():
     baseline_rate = baseline["decisions_per_second"]
     print(f"today's baseline: {baseline_rate:,.0f} decisions/s")
 
-    # The bulk run's per-request anchor row, learner off. It is not in the verdict.
+    # The bulk run's per-request anchor row, learner off. It is not in the verdict. The servers
+    # grid leaves it out: its own one-server row is the anchor there.
     anchor = None
-    if args.bulk:
+    if args.bulk and args.servers_grid is None:
         anchor = run(args.actors, ANCHOR_HANDS, False, kept_seconds, choice_share, False)
         add_speedups(anchor, False)
         print_row(f"anchor, per request, hands {ANCHOR_HANDS}, learner off", anchor)
 
     hands_list = parse_sizes(args.hands)
     rows = []
-    for hands in hands_list:
-        for learner_on in [False, True]:
-            row = run(args.actors, hands, learner_on, kept_seconds, choice_share, args.bulk)
-            add_speedups(row, learner_on)
-            rows.append(row)
-            learner_label = "off"
-            if learner_on:
-                learner_label = "on"
-            print_row(f"hands {hands}, learner {learner_label}", row)
+    if args.servers_grid is None:
+        for hands in hands_list:
+            for learner_on in [False, True]:
+                row = run(args.actors, hands, learner_on, kept_seconds, choice_share, args.bulk)
+                add_speedups(row, learner_on)
+                rows.append(row)
+                learner_label = "off"
+                if learner_on:
+                    learner_label = "on"
+                print_row(f"hands {hands}, learner {learner_label}", row)
+    else:
+        # The servers grid runs learner on only: the verdict reads nothing else.
+        for hands in hands_list:
+            for num_servers, num_gpus in server_settings:
+                row = run(
+                    args.actors, hands, True, kept_seconds, choice_share, args.bulk,
+                    num_servers, num_gpus,
+                )
+                add_speedups(row, True)
+                rows.append(row)
+                print_row(
+                    f"hands {hands}, servers {num_servers} on {num_gpus} GPUs "
+                    f"({row['servers_used']} used), learner on",
+                    row,
+                )
 
     # The verdict reads only the learner-on rows: in a real run the learner is always there.
     best_row = None
@@ -770,7 +862,10 @@ def main():
         verdict = "no build"
     else:
         verdict = "build"
-    print(f"best learner-on: hands {best_row['hands']}, run x{best_row['run_speedup']:.2f}; verdict: {verdict}")
+    print(
+        f"best learner-on: hands {best_row['hands']}, servers {best_row['num_servers']} on "
+        f"{best_row['num_gpus']} GPUs, run x{best_row['run_speedup']:.2f}; verdict: {verdict}"
+    )
     # The best at 4 or at 16 means the peak may sit between them, if nothing was run there.
     best_at_gap_edge = best_row["hands"] == HANDS_GAP_LOW or best_row["hands"] == HANDS_GAP_HIGH
     if best_at_gap_edge and HANDS_GAP_MIDDLE not in hands_list:
@@ -786,6 +881,8 @@ def main():
     design = ""
     if args.bulk:
         design = "_bulk"
+    if args.servers_grid is not None:
+        design += "_servers"
     run_name = (
         f"{config_name(args.players)}_round_trip{design}_{machine}_dev_s{args.seconds:g}"
         f"_seed{args.seed}"
@@ -807,8 +904,11 @@ def main():
         "baseline": baseline,
         "bulk": args.bulk,
         "anchor": anchor,
+        "server_settings": server_settings,
         "rows": rows,
         "best_hands": best_row["hands"],
+        "best_num_servers": best_row["num_servers"],
+        "best_num_gpus": best_row["num_gpus"],
         "best_run_speedup": best_row["run_speedup"],
         "build_threshold": BUILD_THRESHOLD,
         "verdict": verdict,
