@@ -333,6 +333,18 @@ MUTATIONS = (
         "(row_slots[row], row_ids[row], answers[len(decisions) - 1 - row]))",
     ),
     (
+        "every actor routed to server 0",
+        ROUND_TRIP_SCRIPT,
+        "request_queues[actor_id % num_servers],",
+        "request_queues[0],",
+    ),
+    (
+        "actor net pairs answers with the wrong rows",
+        ROUND_TRIP_SCRIPT,
+        "batch_answers = batched_choices(net, batch, device)",
+        "batch_answers = batched_choices(net, batch, device)[::-1]",
+    ),
+    (
         "run speedup cap not shrunk by the learner's slowdown",
         ROUND_TRIP_SCRIPT,
         "cap = learner_cap / learner_slowdown",

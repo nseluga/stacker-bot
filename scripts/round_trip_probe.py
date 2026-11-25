@@ -21,10 +21,18 @@ Two message designs (step 13c, decision log 2026-11-23): per request (the defaul
 message per server batch. The bulk run adds one per-request row at ANCHOR_HANDS, so both
 designs are compared on the same machine on the same day.
 
+Two placements reopened after the bulk no-build (decision log 2026-11-24): several servers
+spread over the GPUs (--servers-grid, step 13d), and a net in each actor with no server
+(--actor-net, gpu_actor_loop, step 13e).
+
 Run from the repo root (about 10 minutes with the defaults, on teapot):
     PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14
     PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14 --bulk \
         --hands 1,4,8,16
+    PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14 --bulk \
+        --hands 16 --servers-grid 1:1,2:2,2:1,4:2,8:2
+    PYTHONPATH=src .venv/bin/python scripts/round_trip_probe.py --players 4 --seed 14 \
+        --actor-net --hands 16,32,64
 Output: results/specialist_explore/<config>_round_trip[_bulk]_<machine>_dev_s<seconds>_seed<s>.json
 
 The fake costs come from the ceiling probe's split, so both probes rest on one measurement.
@@ -103,11 +111,17 @@ HANDS_GAP_HIGH = 16
 # The bulk run's one per-request row, learner off: the per-request teapot run's 10,493
 # decisions/s at 8 hands should come back if the machine is the same as that day.
 ANCHOR_HANDS = 8
+# The --actor-net run's one learner-off row: the actors' own rate at this many hands, so the
+# learner's cost to the actors shows next to the learner-on row (plan, step 13e).
+ACTOR_NET_LEARNER_OFF_HANDS = 32
+BYTES_PER_GB = 1e9
 LIMITS = (
     "engine and encoding faked with a busy-wait of the ceiling split's cost; no weight copy from "
     "learner to server; the round trip includes time an answer waits for its actor to finish "
     "another hand"
 )
+# Added to LIMITS for an --actor-net run: each actor's net never gets the learner's weights.
+ACTOR_NET_LIMITS = "; no weight copy from learner to each actor's net"
 
 
 def fake_actor_loop(
@@ -254,6 +268,116 @@ def fake_actor_loop(
             "answers": answers,
             "spin_seconds": spin_seconds,
             "wait_seconds": wait_seconds,
+        }
+    )
+
+
+def gpu_actor_loop(
+    actor_id,
+    hands,
+    decisions,
+    kept_seconds,
+    choice_share,
+    seed,
+    device_name,
+    measure_event,
+    stop_event,
+    result_queue,
+    record_answers,
+):
+    """
+    One fake actor that scores its own decisions on its own GPU, playing `hands` hands at once
+    until stop_event is set: the net-in-each-actor design (step 13e), with no server and no
+    queues.
+
+    Each pass, every hand plays one decision: a busy-wait of kept_seconds, then the same seeded
+    draw as fake_actor_loop decides the turn's kind. A forced turn counts as done at once. A
+    choice turn's decision joins this pass's list. At the end of the pass, one batched_choices
+    call scores the whole list on this actor's device, and every hand is ready again. So the
+    batch is this actor's choice turns of one pass, about choice_share * hands decisions.
+
+    DouZero's actors also hold the model on a GPU, but call it once per decision; batching
+    across hands is this probe's addition (decision log 2026-11-24).
+
+    actor_id, hands, decisions, kept_seconds, choice_share, seed, measure_event, stop_event,
+        record_answers: as in fake_actor_loop.
+    device_name: str, this actor's device, e.g. "cuda:1"; the caller spreads actors over GPUs.
+    result_queue: gets one dict at the end with fake_actor_loop's keys, so run_setting reads it
+        unchanged: round_trips are from a choice turn's draw to its answer (the rest of the
+        pass plus the net call), wait_seconds is 0 (the actor never blocks). Two more keys,
+        both while measuring: net_seconds (in batched_choices) and net_calls.
+    """
+    # One CPU thread per actor: 24 actors must not fight over the cores for torch's threads.
+    torch.set_num_threads(1)
+    device = torch.device(device_name)
+    net = untrained_net().to(device)
+    net.eval()
+
+    rng = random.Random(seed)
+    pool_size = len(decisions)
+    # Each hand's next place in the pool; hands start at different places, as in
+    # fake_actor_loop.
+    next_index = []
+    for slot in range(hands):
+        next_index.append((actor_id * hands + slot) % pool_size)
+
+    decisions_done = 0
+    round_trips = []
+    answers = []
+    spin_seconds = 0.0
+    net_seconds = 0.0
+    net_calls = 0
+
+    while not stop_event.is_set():
+        # Every hand plays one decision; choice turns wait for the pass's one net call.
+        batch_indices = []
+        batch_started = []
+        for slot in range(hands):
+            # Busy-wait, not sleep: the real engine keeps its core busy for this long.
+            spin_start = time.perf_counter()
+            spin_until = spin_start + kept_seconds
+            while time.perf_counter() < spin_until:
+                pass
+            if measure_event.is_set():
+                spin_seconds += time.perf_counter() - spin_start
+            if rng.random() < choice_share:
+                pool_index = next_index[slot]
+                next_index[slot] = (pool_index + 1) % pool_size
+                batch_indices.append(pool_index)
+                batch_started.append(time.perf_counter())
+            else:
+                if measure_event.is_set():
+                    decisions_done += 1
+
+        if len(batch_indices) == 0:
+            continue
+        # One call for the pass: answer i belongs to batch_indices[i], same order in and out.
+        batch = []
+        for pool_index in batch_indices:
+            batch.append(decisions[pool_index])
+        net_start = time.perf_counter()
+        batch_answers = batched_choices(net, batch, device)
+        net_end = time.perf_counter()
+
+        if measure_event.is_set():
+            net_seconds += net_end - net_start
+            net_calls += 1
+            decisions_done += len(batch_indices)
+            for row in range(len(batch_indices)):
+                round_trips.append(net_end - batch_started[row])
+                if record_answers:
+                    answers.append((batch_indices[row], batch_answers[row]))
+
+    result_queue.put(
+        {
+            "actor_id": actor_id,
+            "decisions": decisions_done,
+            "round_trips": round_trips,
+            "answers": answers,
+            "spin_seconds": spin_seconds,
+            "wait_seconds": 0.0,
+            "net_seconds": net_seconds,
+            "net_calls": net_calls,
         }
     )
 
@@ -472,6 +596,7 @@ def run_setting(
     bulk,
     num_servers=1,
     num_gpus=1,
+    actor_net=False,
 ):
     """
     Runs one setting with real processes and returns its rates.
@@ -492,6 +617,8 @@ def run_setting(
     reach the actor that asked.
     num_gpus: G; server s runs on device_name:{s % G}. The learner stays on device_name, which
     for "cuda" is GPU 0. G must be 1 on the CPU.
+    actor_net: True runs gpu_actor_loop actors instead (step 13e): actor a scores its own
+    decisions on device_name:{a % G}, no server starts, and num_servers and bulk are unused.
     Returns a dict: the inputs, measured_seconds, decisions_per_second, the median and p90
     round trip in microseconds (it includes the time an answer waits for its actor to finish
     another hand), servers_used, mean_batch over every server's calls, server_busy_share (net
@@ -499,7 +626,9 @@ def run_setting(
     per request, net share, requests per message; shares are of all servers' time together,
     so 1.0 means every server busy all the time), the actors' split (spin, wait and other shares of their time),
     learner_updates_per_second, and answers (one list per actor, filled only if
-    record_answers).
+    record_answers). With actor_net, servers_used is 0, mean_batch is over the actors' own net
+    calls, actor_net_share is the actors' time in those calls (part of actor_other_share), and
+    gpu_used_gb lists each GPU's memory in use near the end of the window (cuda only).
     """
     # spawn, as train uses: a forked child would inherit torch's threads mid-state.
     context = multiprocessing.get_context("spawn")
@@ -526,7 +655,7 @@ def run_setting(
             raise RuntimeError("the dummy learner did not build its batch in time")
 
     server_on = False
-    if num_actors > 0 and choice_share > 0:
+    if num_actors > 0 and choice_share > 0 and not actor_net:
         server_on = True
         for server_id in range(num_servers):
             # Spread the servers over the GPUs in turn: with 4 servers on 2 GPUs, servers 0
@@ -545,6 +674,21 @@ def run_setting(
             processes.append(server)
 
     for actor_id in range(num_actors):
+        if actor_net:
+            # Spread the actors over the GPUs in turn, as the servers are spread above.
+            actor_device = device_name
+            if num_gpus > 1:
+                actor_device = f"{device_name}:{actor_id % num_gpus}"
+            actor = context.Process(
+                target=gpu_actor_loop,
+                args=(
+                    actor_id, hands, decisions, kept_seconds, choice_share, seed + actor_id,
+                    actor_device, measure_event, stop_event, result_queue, record_answers,
+                ),
+            )
+            actor.start()
+            processes.append(actor)
+            continue
         actor = context.Process(
             target=fake_actor_loop,
             args=(
@@ -573,6 +717,13 @@ def run_setting(
     measure_event.set()
     measure_start = time.perf_counter()
     time.sleep(measure_seconds)
+    # Net in each actor: read each GPU's memory in use while every actor still holds its net.
+    # It counts everything on the GPU, the learner and other users' processes included.
+    gpu_used_bytes = []
+    if actor_net and device_name.startswith("cuda"):
+        for gpu in range(num_gpus):
+            free_bytes, total_bytes = torch.cuda.mem_get_info(gpu)
+            gpu_used_bytes.append(total_bytes - free_bytes)
     stop_event.set()
     measured_seconds = time.perf_counter() - measure_start
 
@@ -606,7 +757,13 @@ def run_setting(
     answers = []
     total_spin_seconds = 0.0
     total_wait_seconds = 0.0
+    # Only gpu_actor_loop actors report their own net time and calls.
+    total_actor_net_seconds = 0.0
+    total_actor_net_calls = 0
     for result in sorted(actor_results, key=lambda item: item["actor_id"]):
+        if actor_net:
+            total_actor_net_seconds += result["net_seconds"]
+            total_actor_net_calls += result["net_calls"]
         total_decisions += result["decisions"]
         round_trips.extend(result["round_trips"])
         answers.append(result["answers"])
@@ -632,6 +789,7 @@ def run_setting(
         "bulk": bulk,
         "num_servers": num_servers,
         "num_gpus": num_gpus,
+        "actor_net": actor_net,
         "servers_used": None,
         "measured_seconds": measured_seconds,
         "decisions_per_second": total_decisions / measured_seconds,
@@ -646,6 +804,8 @@ def run_setting(
         "actor_spin_share": None,
         "actor_wait_share": None,
         "actor_other_share": None,
+        "actor_net_share": None,
+        "gpu_used_gb": [],
         "learner_updates_per_second": None,
         "answers": answers,
     }
@@ -683,6 +843,15 @@ def run_setting(
         summary["actor_spin_share"] = total_spin_seconds / actor_seconds
         summary["actor_wait_share"] = total_wait_seconds / actor_seconds
         summary["actor_other_share"] = 1.0 - (total_spin_seconds + total_wait_seconds) / actor_seconds
+    # Net in each actor: one round trip is kept per choice turn, so choice turns over net calls
+    # is the mean batch.
+    if actor_net:
+        summary["servers_used"] = 0
+        summary["actor_net_share"] = total_actor_net_seconds / (num_actors * measured_seconds)
+        for used_bytes in gpu_used_bytes:
+            summary["gpu_used_gb"].append(used_bytes / BYTES_PER_GB)
+        if total_actor_net_calls > 0:
+            summary["mean_batch"] = len(round_trips) / total_actor_net_calls
     if learner_result is not None:
         summary["learner_updates_per_second"] = learner_result["updates"] / measured_seconds
     return summary
@@ -724,11 +893,19 @@ def main():
         default=None,
         help="servers:GPUs pairs, comma list (e.g. 1:1,2:2,2:1,4:2,8:2); learner-on rows only",
     )
+    parser.add_argument(
+        "--actor-net",
+        action="store_true",
+        help="each actor scores its own decisions on its own GPU share; no server, learner-on rows",
+    )
     args = parser.parse_args()
     if args.seed < DEV_SEED_MIN:
         raise SystemExit(
             f"dev runs use seeds ≥ {DEV_SEED_MIN}; 0–2 are test seeds, got {args.seed}"
         )
+    # The net-in-each-actor design has no server, so no message design and no servers grid.
+    if args.actor_net and (args.bulk or args.servers_grid is not None):
+        raise SystemExit("--actor-net runs without --bulk or --servers-grid")
 
     # The fake actor's costs, per decision, from the ceiling probe's measured split.
     with open(args.ceiling_json) as file:
@@ -773,10 +950,13 @@ def main():
 
     decisions = choice_decisions(args.players, args.seed, DECISION_POOL_SIZE)
 
-    def run(num_actors, hands, learner_on, kept, share, bulk, num_servers=1, num_gpus=1):
+    def run(
+        num_actors, hands, learner_on, kept, share, bulk, num_servers=1, num_gpus=1,
+        actor_net=False,
+    ):
         return run_setting(
             num_actors, hands, learner_on, decisions, kept, share, args.device, args.seed,
-            args.warmup, args.seconds, False, bulk, num_servers, num_gpus,
+            args.warmup, args.seconds, False, bulk, num_servers, num_gpus, actor_net,
         )
 
     def add_speedups(row, learner_on):
@@ -801,6 +981,17 @@ def main():
             f"round trip median {row['round_trip_incl_actor_wait_median_us']:.0f} us, "
             f"learner slowdown x{row['learner_slowdown']:.2f}"
         )
+        # With the net in each actor there is no server line; the actors' net share replaces it.
+        if row["actor_net"]:
+            memory = []
+            for used_gb in row["gpu_used_gb"]:
+                memory.append(f"{used_gb:.1f}")
+            print(
+                f"  actors: spin {row['actor_spin_share']:.0%}, net "
+                f"{row['actor_net_share']:.0%}, other {row['actor_other_share']:.0%}; "
+                f"GPU memory in use (GB): {', '.join(memory)}"
+            )
+            return
         print(
             f"  server: net {row['server_net_share']:.0%}, drain {drain}/request, "
             f"reply {row['server_reply_us_per_request']:.0f} us/request, "
@@ -826,7 +1017,29 @@ def main():
 
     hands_list = parse_sizes(args.hands)
     rows = []
-    if args.servers_grid is None:
+    if args.actor_net:
+        # Every actor holds its own net, spread over every GPU. The learner-on rows are what the
+        # verdict reads nothing else. One learner-off row shows the learner's cost to the actors.
+        actor_net_settings = []
+        for hands in hands_list:
+            actor_net_settings.append((hands, True))
+        actor_net_settings.append((ACTOR_NET_LEARNER_OFF_HANDS, False))
+        for hands, learner_on in actor_net_settings:
+            row = run(
+                args.actors, hands, learner_on, kept_seconds, choice_share, False, 0,
+                gpus_available, True,
+            )
+            add_speedups(row, learner_on)
+            rows.append(row)
+            learner_label = "off"
+            if learner_on:
+                learner_label = "on"
+            print_row(
+                f"hands {hands}, net in each actor on {gpus_available} GPUs, "
+                f"learner {learner_label}",
+                row,
+            )
+    elif args.servers_grid is None:
         for hands in hands_list:
             for learner_on in [False, True]:
                 row = run(args.actors, hands, learner_on, kept_seconds, choice_share, args.bulk)
@@ -862,8 +1075,11 @@ def main():
         verdict = "no build"
     else:
         verdict = "build"
+    placement = f"servers {best_row['num_servers']}"
+    if best_row["actor_net"]:
+        placement = "net in each actor"
     print(
-        f"best learner-on: hands {best_row['hands']}, servers {best_row['num_servers']} on "
+        f"best learner-on: hands {best_row['hands']}, {placement} on "
         f"{best_row['num_gpus']} GPUs, run x{best_row['run_speedup']:.2f}; verdict: {verdict}"
     )
     # The best at 4 or at 16 means the peak may sit between them, if nothing was run there.
@@ -883,6 +1099,10 @@ def main():
         design = "_bulk"
     if args.servers_grid is not None:
         design += "_servers"
+    limits = LIMITS
+    if args.actor_net:
+        design += "_actor_net"
+        limits += ACTOR_NET_LIMITS
     run_name = (
         f"{config_name(args.players)}_round_trip{design}_{machine}_dev_s{args.seconds:g}"
         f"_seed{args.seed}"
@@ -905,6 +1125,7 @@ def main():
         "bulk": args.bulk,
         "anchor": anchor,
         "server_settings": server_settings,
+        "actor_net": args.actor_net,
         "rows": rows,
         "best_hands": best_row["hands"],
         "best_num_servers": best_row["num_servers"],
@@ -912,7 +1133,7 @@ def main():
         "best_run_speedup": best_row["run_speedup"],
         "build_threshold": BUILD_THRESHOLD,
         "verdict": verdict,
-        "limits": LIMITS,
+        "limits": limits,
         "git_commit": commit,
         "uncommitted_changes": uncommitted_changes,
     }
