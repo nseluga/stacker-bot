@@ -17,7 +17,9 @@ played. The pieces, in build order:
   placement scores (head "classifier", the set 9 arm, spec part 18). The classifier's Q is the
   expected score of its placement probabilities, so forward returns Q either way.
 - The loss: q_loss compares the Q of the action that was played with the score the hand really
-  gave (mean squared error; decision log, 2026-11-12).
+  gave (mean squared error; decision log, 2026-11-12). The classifier's loss, placement_loss,
+  is the cross-entropy between the taken action's placement probabilities and a smoothed label
+  built from the return by hl_gauss_labels.
 """
 
 import numpy as np
@@ -46,6 +48,12 @@ CLASS_FIRST = 2
 PLACEMENT_CLASSES = 3
 # Output units of the last layer for each head.
 HEAD_OUTPUTS = {HEAD_MSE: 1, HEAD_CLASSIFIER: PLACEMENT_CLASSES}
+# HL-Gauss labels (spec part 18; Farebrother 2024 eq. 3.3). Each class is a bin one point wide,
+# centred on its score; these are the bins' edges, lowest first. The label spreads a normal curve
+# of this width, centred on the return, over the bins (sigma / bin width 0.75, the source's
+# default; decision log 2026-11-25).
+CLASS_EDGES = (-0.5, 0.5, 1.5, 2.5)
+HL_GAUSS_SIGMA = 0.75
 
 
 def collate_decisions(decisions):
@@ -235,3 +243,47 @@ def q_loss(q_values, taken_index, returns):
     # Only the taken Q enters the loss, so the other K - 1 values of a row get no gradient from
     # this decision. mse_loss subtracts, squares and takes the mean over the batch.
     return nn.functional.mse_loss(taken_q, returns)
+
+
+def hl_gauss_labels(returns):
+    """
+    The smoothed placement label for each return (spec part 18; Farebrother 2024 eq. 3.3).
+    returns: float32 [B], each decision's final score (0, 1 or 2).
+    Returns float32 [B, PLACEMENT_CLASSES]: per decision, the share of a normal curve centred on
+      its return (width HL_GAUSS_SIGMA) that falls in each class's bin, rescaled to sum to 1.
+      A return of 2 gives about [0.030, 0.308, 0.663] (neither, 2nd, 1st).
+    """
+    edges = torch.tensor(CLASS_EDGES, dtype=returns.dtype, device=returns.device)  # [4]
+
+    # The normal curve's cumulative probability at every edge: ndtr is the standard normal CDF,
+    # so each edge is first measured in sigmas from the return. [B, 1] against [4] gives [B, 4].
+    edge_cdf = torch.special.ndtr((edges - returns.unsqueeze(1)) / HL_GAUSS_SIGMA)
+
+    # A bin's share is the rise in the CDF between its two edges. The tails beyond the outer
+    # edges fall in no bin, so the shares are divided by their total, which is what lies
+    # between the outer edges, to make each row sum to 1.
+    bin_mass = edge_cdf[:, 1:] - edge_cdf[:, :-1]  # [B, 3]
+    inside_mass = edge_cdf[:, -1:] - edge_cdf[:, :1]  # [B, 1]
+    return bin_mass / inside_mass
+
+
+def placement_loss(logits, taken_index, returns):
+    """
+    Cross-entropy between the taken action's placement probabilities and its HL-Gauss label
+    (spec part 18, eq. 5'); the classifier head's replacement for q_loss.
+    logits: float32 [B, K, PLACEMENT_CLASSES] from QNet.head_outputs on a classifier net.
+    taken_index: int64 [B], the column of the action each decision played (a real action).
+    returns: float32 [B], the hand's final score for the seat that decided (0, 1 or 2).
+    Returns a scalar tensor: the cross-entropy, averaged over the B decisions. Its lowest value
+    is the labels' mean entropy, not 0, since a smoothed label is never one class.
+    """
+    # gather needs an index with as many axes as logits: [B] becomes [B, 1, 3], the same column
+    # for all three classes, and the result [B, 1, 3] goes back to [B, 3].
+    index = taken_index.view(-1, 1, 1).expand(-1, 1, PLACEMENT_CLASSES)
+    taken_logits = logits.gather(1, index).squeeze(1)
+
+    # With probabilities as targets, cross_entropy takes softmax of the logits itself and sums
+    # -label * log(probability) over the three classes, then averages over the batch. Only the
+    # taken action's logits enter, so the other K - 1 actions get no gradient (as in eq. 5).
+    labels = hl_gauss_labels(returns)
+    return nn.functional.cross_entropy(taken_logits, labels)
