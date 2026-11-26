@@ -1,0 +1,52 @@
+{
+  "run": "4p1d_dmc_teapot_a24_u37500_seed20_width256",
+  "fields": [
+    "heuristic",
+    "greedy"
+  ],
+  "deals": 1000,
+  "seed": 22,
+  "source": "dev",
+  "test_seats": [
+    0
+  ],
+  "checkpoints": [
+    0,
+    1250,
+    2500,
+    3750,
+    5000,
+    6250,
+    7500,
+    8750,
+    10000,
+    11250,
+    12500,
+    13750,
+    15000,
+    16250,
+    17500,
+    18750,
+    20000,
+    21250,
+    22500,
+    23750,
+    25000,
+    26250,
+    27500,
+    28750,
+    30000,
+    31250,
+    32500,
+    33750,
+    35000,
+    36250,
+    37500
+  ],
+  "workers": 39,
+  "total_seconds": 1039.62,
+  "git_commit": "45d71cb46f70faed2de0ad0c4af31efd72e5b936",
+  "uncommitted_changes": false,
+  "run_git_commit": "45d71cb46f70faed2de0ad0c4af31efd72e5b936",
+  "run_uncommitted_changes": false
+}

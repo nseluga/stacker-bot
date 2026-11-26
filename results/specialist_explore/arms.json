@@ -1,6 +1,48 @@
 {
   "arm_length_updates": 37500,
-  "control": [],
-  "repeat": {"long": "4p1d_dmc_teapot_a24_u93750_seed20", "short": "4p1d_dmc_teapot_a24_u18750_seed20"},
-  "families": {}
+  "control": [
+    "4p1d_dmc_teapot_a24_u93750_seed20",
+    "4p1d_dmc_teapot_a24_u37500_seed21",
+    "4p1d_dmc_teapot_a24_u37500_seed23"
+  ],
+  "repeat": {
+    "long": "4p1d_dmc_teapot_a24_u93750_seed20",
+    "short": "4p1d_dmc_teapot_a24_u18750_seed20"
+  },
+  "families": {
+    "width_lr": [
+      {
+        "label": "W256",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_width256",
+        "second_seed_run": null
+      },
+      {
+        "label": "W256 lr3e-4",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_width256-lr3e-4",
+        "second_seed_run": null
+      },
+      {
+        "label": "W512 lr3e-4",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_lr3e-4",
+        "second_seed_run": null
+      },
+      {
+        "label": "W1024",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_width1024",
+        "second_seed_run": null
+      },
+      {
+        "label": "W1024 lr3e-4",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_width1024-lr3e-4",
+        "second_seed_run": null
+      }
+    ],
+    "optimizer": [
+      {
+        "label": "Adam lr1e-4",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_adam-lr1e-4",
+        "second_seed_run": null
+      }
+    ]
+  }
 }
