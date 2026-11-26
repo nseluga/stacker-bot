@@ -42,6 +42,11 @@
         "label": "Adam lr1e-4",
         "run": "4p1d_dmc_teapot_a24_u37500_seed20_adam-lr1e-4",
         "second_seed_run": null
+      },
+      {
+        "label": "Adam lr3e-4",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_adam-lr3e-4",
+        "second_seed_run": null
       }
     ]
   }
