@@ -207,8 +207,8 @@ MUTATIONS = (
     (
         "train starts from another seed",
         DMC,
-        "    torch.manual_seed(seed)\n    q_net = QNet(width=width,",
-        "    torch.manual_seed(seed + 1)\n    q_net = QNet(width=width,",
+        "    torch.manual_seed(seed)\n    q_net = QNet(\n        width=width,",
+        "    torch.manual_seed(seed + 1)\n    q_net = QNet(\n        width=width,",
     ),
     (
         "checkpoint 0 is not the starting net",
@@ -308,6 +308,48 @@ MUTATIONS = (
         '        config["heuristic_chair"] = False\n',
     ),
     (
+        "classifier Q weights neither as first",
+        NET,
+        "CLASS_FIRST * probabilities[..., CLASS_FIRST]",
+        "CLASS_FIRST * probabilities[..., CLASS_NEITHER]",
+    ),
+    (
+        "HL-Gauss labels not renormalized",
+        NET,
+        "    return bin_mass / inside_mass\n",
+        "    return bin_mass\n",
+    ),
+    (
+        "learner trains the classifier with MSE on Q",
+        DMC,
+        "    if q_net.head == HEAD_CLASSIFIER:\n",
+        "    if False:\n",
+    ),
+    (
+        "placement loss always reads action 0",
+        NET,
+        "    index = taken_index.view(-1, 1, 1)",
+        "    index = torch.zeros_like(taken_index).view(-1, 1, 1)",
+    ),
+    (
+        "train builds the nets without the head",
+        DMC,
+        "history_hidden=history_hidden, head=head\n    )\n\n    # The actors' net",
+        "history_hidden=history_hidden\n    )\n\n    # The actors' net",
+    ),
+    (
+        "script drops the head key",
+        TRAIN_SCRIPT,
+        '        config["head"] = HEAD_CLASSIFIER\n',
+        "        pass\n",
+    ),
+    (
+        "eval builds every net as mse",
+        EVAL_SCRIPT,
+        '        head=config.get("head", HEAD_MSE),\n',
+        "        head=HEAD_MSE,\n",
+    ),
+    (
         "learning rate ignored",
         DMC,
         "            lr=learning_rate,\n            alpha=RMSPROP_ALPHA,",
@@ -324,8 +366,8 @@ MUTATIONS = (
         EVAL_SCRIPT,
         '    net = QNet(\n        width=net_config["width"],\n'
         '        hidden_layers=net_config["hidden_layers"],\n'
-        '        history_hidden=net_config["history_hidden"],\n    )',
-        "    net = QNet()",
+        '        history_hidden=net_config["history_hidden"],\n',
+        "    net = QNet(\n",
     ),
     (
         "field net built from the tested run's config",

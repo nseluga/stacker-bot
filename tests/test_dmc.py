@@ -47,6 +47,7 @@ from test_net import DEV_SEED, real_decisions, seeded_net
 # scripts/ is not a package, so the folder goes on the import path for train_dmc.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import train_dmc  # noqa: E402
+from evaluate_checkpoints import load_checkpoint_net  # noqa: E402
 
 from stacker.dmc import (
     EPSILON,
@@ -77,7 +78,7 @@ from stacker.dmc import (
 from stacker.encode import ACTION_DIM, HISTORY_WINDOW, MOVE_DIM, STATE_DIM, encode_action
 from stacker.game import HandState, new_hand, play_out
 from stacker.heuristic import heuristic_agent
-from stacker.net import QNet
+from stacker.net import HEAD_CLASSIFIER, QNet
 
 # Batched-pick gate: copies of one dev hand's decisions, each copy with its own rngs, so the
 # pool is large enough that both explore and greedy picks happen at epsilon 0.3. Pairs of
@@ -113,6 +114,11 @@ ARM_WIDTH = 256
 ARM_HIDDEN_LAYERS = 3
 ARM_HISTORY_HIDDEN = 256
 ARM_PARAMETER_COUNT = 1_118_465
+# The same arm net with the classifier head: its last layer has 3 outputs instead of 1, so 2 more
+# rows of ARM_WIDTH weights and 2 more biases.
+ARM_CLASSIFIER_PARAMETER_COUNT = ARM_PARAMETER_COUNT + 2 * (ARM_WIDTH + 1)
+# An untrained classifier's loss on real samples is within this of ln 3 (spec part 18).
+CLASSIFIER_INITIAL_LOSS_TOLERANCE = 0.01
 # The whole-hand window arm (decision log 2026-11-22).
 ARM_HISTORY_WINDOW = 96
 # Arm tag of the script gate's tiny run; it ends the run directory's name.
@@ -658,6 +664,18 @@ def test_loss_falls_on_a_fixed_batch():
     assert losses[-1] < FIXED_BATCH_LOSS_FRACTION * losses[0]
 
 
+def test_untrained_classifier_loss_is_ln3():
+    # catches: the learner training a classifier net's Q with the squared error (about 0.6 here)
+    # instead of the cross-entropy on its logits, or a sum where the mean belongs.
+    samples, _ = dealt_hand_samples()
+    torch.manual_seed(DEV_SEED)
+    net = QNet(head=HEAD_CLASSIFIER)
+    loss, _ = learner_step(net, control_optimizer(net), samples)
+    # Untrained logits are near 0, so every class gets about 1/3 and the loss is about ln 3,
+    # whatever the labels.
+    assert abs(loss - math.log(3)) < CLASSIFIER_INITIAL_LOSS_TOLERANCE
+
+
 def test_one_step_moves_every_parameter():
     samples, _ = dealt_hand_samples()
     net = seeded_net()
@@ -767,10 +785,12 @@ def test_shuffle_moves_only_the_returns():
     assert again_returns == shuffled_returns
 
 
-def test_same_seed_gives_identical_results():
-    first = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
-    second = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
-    other_seed = train_one_process(DEV_SEED + 1, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE)
+@pytest.mark.parametrize("head", ["mse", HEAD_CLASSIFIER])
+def test_same_seed_gives_identical_results(head):
+    # catches (classifier): a classifier path that draws from an unseeded stream.
+    first = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE, head=head)
+    second = train_one_process(DEV_SEED, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE, head=head)
+    other_seed = train_one_process(DEV_SEED + 1, LOOP_UPDATES, LOOP_SAMPLES_PER_UPDATE, head=head)
 
     assert len(first) == LOOP_UPDATES
     assert first == second
@@ -987,6 +1007,7 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
     actor_arguments = []
     learner_optimizers = []
     learner_batches = []
+    learner_heads = []
 
     # The real "spawn" context, wrapped so each actor's arguments are seen as it is started.
     real_context = torch.multiprocessing.get_context("spawn")
@@ -1004,6 +1025,7 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
     def recording_learner_step(q_net, optimizer, samples):
         learner_optimizers.append(optimizer)
         learner_batches.append(samples)
+        learner_heads.append(q_net.head)
         return 0.0, 0.0
 
     monkeypatch.setattr(torch.multiprocessing, "get_context", recording_get_context)
@@ -1023,11 +1045,14 @@ def test_train_passes_the_arm_settings_on(tmp_path, monkeypatch):
         history_hidden=ARM_HISTORY_HIDDEN,
         history_window=ARM_HISTORY_WINDOW,
         heuristic_chair=True,
+        head=HEAD_CLASSIFIER,
     )
 
-    # The sizes reached the learner's net and the actors' net.
-    assert parameter_count(q_net) == ARM_PARAMETER_COUNT
-    assert parameter_count(actor_net) == ARM_PARAMETER_COUNT
+    # The sizes and the head reached the learner's net and the actors' net.
+    assert parameter_count(q_net) == ARM_CLASSIFIER_PARAMETER_COUNT
+    assert parameter_count(actor_net) == ARM_CLASSIFIER_PARAMETER_COUNT
+    # The learner was handed the classifier net at every update, so it picked the classifier loss.
+    assert learner_heads == [HEAD_CLASSIFIER] * SMOKE_UPDATES
 
     # The learner trained with the optimizer and the rate that were named, at every update.
     assert len(learner_optimizers) == SMOKE_UPDATES
@@ -1203,7 +1228,7 @@ def test_train_script_passes_its_arm_flags_on():
         "--width", str(ARM_WIDTH), "--layers", str(ARM_HIDDEN_LAYERS),
         "--history-hidden", str(ARM_HISTORY_HIDDEN), "--lr", str(ARM_LEARNING_RATE),
         "--history-window", str(ARM_HISTORY_WINDOW),
-        "--epsilon", "0.0", "--optimizer", "adam", "--heuristic-chair",
+        "--epsilon", "0.0", "--optimizer", "adam", "--heuristic-chair", "--head", "classifier",
         "--arm", SCRIPT_ARM_TAG, "--base-run", SCRIPT_BASE_RUN,
     ]
     finished = subprocess.run(
@@ -1213,10 +1238,15 @@ def test_train_script_passes_its_arm_flags_on():
     run_dirs = list(runs_dir.glob(f"*_seed{DEV_SEED}_{SCRIPT_ARM_TAG}"))
     config = None
     checkpoint_weights = None
+    loaded_head = None
     if len(run_dirs) == 1:
         with open(run_dirs[0] / "config.json") as file:
             config = json.load(file)
-        checkpoint_weights = torch.load(run_dirs[0] / f"checkpoint_{0:06d}.pt")
+        checkpoint_path = run_dirs[0] / f"checkpoint_{0:06d}.pt"
+        checkpoint_weights = torch.load(checkpoint_path)
+        # Evaluation rebuilds the net from the run's config; a wrong head fails to load.
+        loaded_net, _ = load_checkpoint_net(checkpoint_path, config)
+        loaded_head = loaded_net.head
     for run_dir in run_dirs:
         shutil.rmtree(run_dir)
     shutil.rmtree(runs_dir / SCRIPT_BASE_RUN, ignore_errors=True)
@@ -1235,11 +1265,13 @@ def test_train_script_passes_its_arm_flags_on():
     assert config["optimizer"] == "adam"
     assert config["base_run"] == SCRIPT_BASE_RUN
     assert config["heuristic_chair"] is True
+    assert config["head"] == HEAD_CLASSIFIER
+    assert loaded_head == HEAD_CLASSIFIER
     # The net that was trained has the arm's size, not only the record of it.
     total = 0
     for weights in checkpoint_weights.values():
         total += weights.numel()
-    assert total == ARM_PARAMETER_COUNT
+    assert total == ARM_CLASSIFIER_PARAMETER_COUNT
 
 
 def test_arm_config_may_differ_from_its_base_only_where_named():
