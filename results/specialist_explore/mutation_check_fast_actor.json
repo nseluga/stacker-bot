@@ -8,8 +8,8 @@
     "tests/test_plot_arms.py",
     "tests/test_round_trip_probe.py"
   ],
-  "commit": "2dc04b2ee08702e7304b14a6dbdf15f1b846eee4",
-  "uncommitted_changes": true,
+  "commit": "96bc2a562ffcabebd711ec1581ab8f3f4e806131",
+  "uncommitted_changes": false,
   "cuda": false,
   "first_red_only": true,
   "resume_log": null,
@@ -235,6 +235,60 @@
       ]
     },
     {
+      "mutation": "classifier Q weights neither as first",
+      "failed_gates": [
+        "test_classifier_q_from_hand_set_logits"
+      ]
+    },
+    {
+      "mutation": "HL-Gauss labels not renormalized",
+      "failed_gates": [
+        "test_untrained_classifier_loss_is_ln3"
+      ]
+    },
+    {
+      "mutation": "learner trains the classifier with MSE on Q",
+      "failed_gates": [
+        "test_untrained_classifier_loss_is_ln3"
+      ]
+    },
+    {
+      "mutation": "placement loss always reads action 0",
+      "failed_gates": [
+        "test_placement_loss_reads_only_the_taken_action"
+      ]
+    },
+    {
+      "mutation": "train builds the nets without the head",
+      "failed_gates": [
+        "test_train_passes_the_arm_settings_on"
+      ]
+    },
+    {
+      "mutation": "script drops the head key",
+      "failed_gates": [
+        "test_train_script_passes_its_arm_flags_on"
+      ]
+    },
+    {
+      "mutation": "eval builds every net as mse",
+      "failed_gates": [
+        "test_train_script_passes_its_arm_flags_on"
+      ]
+    },
+    {
+      "mutation": "placement loss trains on one-hot labels",
+      "failed_gates": [
+        "test_placement_loss_matches_a_hand_worked_value"
+      ]
+    },
+    {
+      "mutation": "script passes the chair to train as False",
+      "failed_gates": [
+        "test_train_script_hands_its_flags_to_train"
+      ]
+    },
+    {
       "mutation": "learning rate ignored",
       "failed_gates": [
         "test_optimizer_is_built_as_named"
@@ -249,7 +303,7 @@
     {
       "mutation": "checkpoint net built with the control sizes, not its run's",
       "failed_gates": [
-        "test_a_1024_wide_checkpoint_loads_and_scores"
+        "test_train_script_passes_its_arm_flags_on"
       ]
     },
     {
