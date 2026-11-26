@@ -47,6 +47,24 @@ EVAL_DEALS = 1000
 EVAL_SEED = 22
 # The fields scored; the rule's metric is the heuristic, greedy is shown beside it.
 FIELDS = ("heuristic", "greedy")
+# The mixed tables (evaluate_checkpoints.py --mixed-table; decision log 2026-11-26), by the field
+# label their files carry. Reported beside the label, never in it. Each gives:
+#   net_suffix: the file-name part naming the table's net seat ("" for a table with none),
+#   title: the plot's title, plot: the plot's file name.
+STYLES_NET_RUN = "4p1d_dmc_teapot_a24_u18750_seed20"
+STYLES_NET_CHECKPOINT = 18750
+MIXED_TABLES = {
+    "mixed-styles": {
+        "net_suffix": f"_vs_{STYLES_NET_RUN}_ckpt{STYLES_NET_CHECKPOINT}",
+        "title": "styles table: heuristic, greedy, 60M net (beside the label, not in it)",
+        "plot": "arms_7_mixed_styles_end_scores.png",
+    },
+    "mixed-weak": {
+        "net_suffix": "",
+        "title": "weak table: random, greedy, heuristic (beside the label, not in it)",
+        "plot": "arms_8_mixed_weak_end_scores.png",
+    },
+}
 # A run's score is the mean over its last 3 checkpoints at or before arm length.
 END_CHECKPOINTS = 3
 # The label for a candidate whose second seed is also a candidate.
@@ -99,6 +117,20 @@ def curve_path(results_dir, run):
 def deals_path(results_dir, run):
     """Path of a run's per-deal file: one row per (checkpoint, field, deal)."""
     return results_dir / f"{run}_eval_dev_n{EVAL_DEALS}_seed{EVAL_SEED}_deals.csv"
+
+
+def mixed_deals_path(results_dir, run, table, checkpoints):
+    """
+    Path of a run's per-deal file for one mixed table (a MIXED_TABLES key), scored at
+    checkpoints. Matches the name evaluate_checkpoints.py --mixed-table writes.
+    """
+    checkpoint_names = []
+    for checkpoint in checkpoints:
+        checkpoint_names.append(str(checkpoint))
+    return results_dir / (
+        f"{run}_eval_dev_n{EVAL_DEALS}_seed{EVAL_SEED}_{table}{MIXED_TABLES[table]['net_suffix']}"
+        f"_ckpt{'-'.join(checkpoint_names)}_deals.csv"
+    )
 
 
 def read_curve(results_dir, run):
@@ -163,6 +195,8 @@ def load_arms(arms_json, results_dir, runs_dir):
         ci_low, ci_high. Empty when arm_length_updates is not set yet.
       control_offsets: {field: each control seed's end score minus the 3 seeds' mean}, the
         band plot 5 draws around 0.
+    Each MIXED_TABLES field joins verdicts and control_offsets once every control seed has
+    that table's file; an arm without one is left out of it. Its label is reported, not ruled on.
     Writes results_dir/arm_verdicts.csv when there are verdicts.
     """
     arms = json.loads(Path(arms_json).read_text())
@@ -197,12 +231,30 @@ def load_arms(arms_json, results_dir, runs_dir):
 
     def run_end_scores(run, field):
         # The control's 300M seed-20 run counts at arm length, not at the end of its file.
+        if field in MIXED_TABLES:
+            checkpoints = end_checkpoints(runs[run]["curve"], FIELDS[0], arm_length)
+            return end_scores(mixed_path(run, field), field, checkpoints)
         checkpoints = end_checkpoints(runs[run]["curve"], field, arm_length)
         return end_scores(deals_path(results_dir, run), field, checkpoints)
 
+    def mixed_path(run, table):
+        # A mixed file names the same end checkpoints as the run's heuristic curve.
+        checkpoints = end_checkpoints(runs[run]["curve"], FIELDS[0], arm_length)
+        return mixed_deals_path(results_dir, run, table, checkpoints)
+
+    # A mixed table counts once all 3 control seeds have played it.
+    scored_fields = list(FIELDS)
+    for table in MIXED_TABLES:
+        all_controls_played = True
+        for run in arms["control"]:
+            if not mixed_path(run, table).exists():
+                all_controls_played = False
+        if all_controls_played:
+            scored_fields.append(table)
+
     # Per field: the 3 control seeds' end scores, and each one's distance from their mean.
     control_scores_by_field = {}
-    for field in FIELDS:
+    for field in scored_fields:
         control_scores = []
         seed_ends = []
         for run in arms["control"]:
@@ -219,8 +271,11 @@ def load_arms(arms_json, results_dir, runs_dir):
     # Each arm, on each field it was scored against.
     for family, family_arms in arms["families"].items():
         for arm in family_arms:
-            for field in FIELDS:
-                if field not in runs[arm["run"]]["curve"]:
+            for field in scored_fields:
+                if field in MIXED_TABLES:
+                    if not mixed_path(arm["run"], field).exists():
+                        continue
+                elif field not in runs[arm["run"]]["curve"]:
                     continue
                 control_scores = control_scores_by_field[field]
                 # A named rng per (arm, field) so a label replays.
@@ -229,7 +284,13 @@ def load_arms(arms_json, results_dir, runs_dir):
                     run_end_scores(arm["run"], field), control_scores, rng
                 )
                 # Winner: the second seed passes the same test.
-                if label == CANDIDATE and arm["second_seed_run"]:
+                second_scored = False
+                if arm["second_seed_run"]:
+                    second_scored = True
+                    if field in MIXED_TABLES:
+                        if not mixed_path(arm["second_seed_run"], field).exists():
+                            second_scored = False
+                if label == CANDIDATE and second_scored:
                     second_rng = random.Random(f"{EVAL_SEED}:{arm['label']}:{field}:second")
                     second_label, _, _, _ = arm_verdict(
                         run_end_scores(arm["second_seed_run"], field), control_scores, second_rng
@@ -433,7 +494,10 @@ def plot_end_scores(verdicts, control_offsets, plot_path, field="heuristic"):
     axis.set_yticks(range(len(rows)))
     axis.set_yticklabels(tick_labels, fontsize=TICK_FONT_SIZE)
     axis.set_xlabel(f"arm - control mean, points per deal vs {field} (95% CI over deals)")
-    style(axis, "end scores against the control (last 3 checkpoints at arm length)")
+    if field in MIXED_TABLES:
+        style(axis, MIXED_TABLES[field]["title"])
+    else:
+        style(axis, "end scores against the control (last 3 checkpoints at arm length)")
     figure.tight_layout()
     figure.savefig(plot_path, dpi=SAVE_DPI)
     plt.close(figure)
@@ -497,6 +561,12 @@ def make_all(arms_json, results_dir, runs_dir):
     path = results_dir / "arms_5_end_scores.png"
     plot_end_scores(verdicts, control_offsets, path)
     written.append(path)
+    # Plots 7 and 8: the same end scores on each mixed table the control seeds have all played.
+    for table, table_settings in MIXED_TABLES.items():
+        if table in control_offsets:
+            path = results_dir / table_settings["plot"]
+            plot_end_scores(verdicts, control_offsets, path, field=table)
+            written.append(path)
     return written
 
 

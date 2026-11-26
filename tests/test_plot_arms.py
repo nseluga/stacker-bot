@@ -115,3 +115,84 @@ def test_labels_read_the_control_at_arm_length_and_all_six_plots_are_written(tmp
     assert len(pngs) == NUM_PLOTS
     for path in pngs:
         assert path.stat().st_size > 0
+
+
+def write_mixed(results_dir, run, table, offset):
+    """One synthetic per-deal file for one mixed table at checkpoints 0..ARM_LENGTH."""
+    checkpoints = []
+    for checkpoint in range(0, ARM_LENGTH + 1, CHECKPOINT_EVERY):
+        checkpoints.append(checkpoint)
+    path = plot_arms.mixed_deals_path(results_dir, run, table, checkpoints)
+    noise = random.Random(f"{run}:{table}")
+    with open(path, "w", newline="") as file:
+        deals = csv.writer(file)
+        deals.writerow(["checkpoint", "field", "deal_index", "difference"])
+        for checkpoint in checkpoints:
+            for deal_index in range(NUM_DEALS):
+                value = offset + noise.gauss(0.0, RUN_NOISE)
+                deals.writerow([checkpoint, table, deal_index, value])
+
+
+def test_mixed_file_name_matches_what_evaluate_checkpoints_writes():
+    # catches: plot_arms looking for a name the eval script never writes, so every mixed table
+    # is silently skipped. The expected names are evaluate_checkpoints.py --mixed-table's format.
+    styles = plot_arms.mixed_deals_path(Path("r"), "run", "mixed-styles", [35000, 36250, 37500])
+    weak = plot_arms.mixed_deals_path(Path("r"), "run", "mixed-weak", [35000, 36250, 37500])
+    assert styles.name == (
+        "run_eval_dev_n1000_seed22_mixed-styles_vs_4p1d_dmc_teapot_a24_u18750_seed20_ckpt18750"
+        "_ckpt35000-36250-37500_deals.csv"
+    )
+    assert weak.name == "run_eval_dev_n1000_seed22_mixed-weak_ckpt35000-36250-37500_deals.csv"
+
+
+def test_each_mixed_table_is_labelled_only_once_every_control_played_it(tmp_path):
+    # catches: a table labelled while a control seed has not played it (the control mean would
+    # come from 2 seeds or crash); an arm or second seed without a table's file crashing the
+    # script, or the arm called a winner on a second seed that never played the table.
+    results_dir = tmp_path / "results"
+    runs_dir = tmp_path / "runs"
+    results_dir.mkdir()
+    write_run(results_dir, runs_dir, "control-20", CONTROL_OFFSETS[0], 2 * ARM_LENGTH)
+    write_run(results_dir, runs_dir, "control-21", CONTROL_OFFSETS[1], ARM_LENGTH)
+    write_run(results_dir, runs_dir, "control-23", CONTROL_OFFSETS[2], ARM_LENGTH)
+    write_run(results_dir, runs_dir, "stage4-60M", CONTROL_OFFSETS[0], ARM_LENGTH)
+    write_run(results_dir, runs_dir, "wide-20", WIDE_OFFSET, ARM_LENGTH)
+    write_run(results_dir, runs_dir, "wide-21", WIDE_OFFSET, ARM_LENGTH)
+    write_run(results_dir, runs_dir, "narrow-20", NARROW_OFFSET, ARM_LENGTH)
+    # Styles: all controls and the wide arm's first seed; wide-21 and narrow have not played it.
+    # Weak: control seed 23 has not played it yet, so it must not be labelled for anyone.
+    played = (
+        ("mixed-styles", "control-20", CONTROL_OFFSETS[0]),
+        ("mixed-styles", "control-21", CONTROL_OFFSETS[1]),
+        ("mixed-styles", "control-23", CONTROL_OFFSETS[2]),
+        ("mixed-styles", "wide-20", WIDE_OFFSET),
+        ("mixed-weak", "control-20", CONTROL_OFFSETS[0]),
+        ("mixed-weak", "control-21", CONTROL_OFFSETS[1]),
+        ("mixed-weak", "wide-20", WIDE_OFFSET),
+    )
+    for table, run, offset in played:
+        write_mixed(results_dir, run, table, offset)
+    arms = {
+        "arm_length_updates": ARM_LENGTH,
+        "control": ["control-20", "control-21", "control-23"],
+        "repeat": {"long": "control-20", "short": "stage4-60M"},
+        "families": {"width": [
+            {"label": "W1024", "run": "wide-20", "second_seed_run": "wide-21"},
+            {"label": "W256", "run": "narrow-20", "second_seed_run": None},
+        ]},
+    }
+    arms_json = tmp_path / "arms.json"
+    arms_json.write_text(json.dumps(arms))
+
+    written = plot_arms.make_all(arms_json, results_dir, runs_dir)
+
+    labels_by_table = {}
+    with open(results_dir / "arm_verdicts.csv") as file:
+        for row in csv.DictReader(file):
+            if row["field"] in plot_arms.MIXED_TABLES:
+                if row["field"] not in labels_by_table:
+                    labels_by_table[row["field"]] = {}
+                labels_by_table[row["field"]][row["label"]] = row["verdict"]
+    assert labels_by_table == {"mixed-styles": {"W1024": "candidate"}}
+    assert results_dir / "arms_7_mixed_styles_end_scores.png" in written
+    assert results_dir / "arms_8_mixed_weak_end_scores.png" not in written

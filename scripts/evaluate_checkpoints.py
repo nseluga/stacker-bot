@@ -56,10 +56,17 @@ CONTROL_NET_CONFIG = {
     "history_window": HISTORY_WINDOW,
 }
 
-# The mixed table (stage 5, "Mixed table"): the field seats hold one of each style, the field
-# run's net and these agents. Its result is labelled MIXED_FIELD.
-MIXED_FIELD = "mixed"
-MIXED_FIELD_AGENTS = ("heuristic", "greedy")
+# The mixed tables (stage 5, "Mixed table"; decision log 2026-11-26, generalization tables):
+# the three field seats hold one agent each, never the test net's own copy. MIXED_TABLE_NET marks
+# the seat that --field-run's net takes. A table's result is labelled MIXED_PREFIX + its name.
+MIXED_TABLE_NET = "net"
+MIXED_TABLES = {
+    # Two scripted styles and a learned net from outside the comparison (the 60M seed-20 net).
+    "styles": ("heuristic", "greedy", MIXED_TABLE_NET),
+    # No learned net: whether the test net beats weak and scripted play when no net is there.
+    "weak": ("random", "greedy", "heuristic"),
+}
+MIXED_PREFIX = "mixed-"
 
 # Results sit under the same slug as the runs they score.
 RESULTS_DIR = RESULTS_ROOT / RUNS_DIR.name
@@ -120,6 +127,27 @@ def checkpoint_agent(net, history_window, observation, actions, rng):
     return actions[index]
 
 
+def mixed_table_field(table_name, field_net_agent):
+    """
+    The field agents of one mixed table, in seat order: the input mixed_table_differences takes.
+    table_name: a key of MIXED_TABLES. field_net_agent: the --field-run net as an agent, or None
+      for a table with no net seat.
+    Returns a list of 3 agents. Raises ValueError when the net seat and field_net_agent disagree:
+    a net table with no net, or a net given to a table that would never seat it.
+    """
+    seat_names = MIXED_TABLES[table_name]
+    if (MIXED_TABLE_NET in seat_names) != (field_net_agent is not None):
+        raise ValueError(f"mixed table {table_name!r} and the field net do not match")
+
+    field_agents = []
+    for seat_name in seat_names:
+        if seat_name == MIXED_TABLE_NET:
+            field_agents.append(field_net_agent)
+        else:
+            field_agents.append(AGENTS[seat_name])
+    return field_agents
+
+
 def evaluate_checkpoint(task):
     """
     Scores one checkpoint against one field agent on dev deals. Runs in a worker process.
@@ -128,8 +156,8 @@ def evaluate_checkpoint(task):
     ≥ 10; run_config is the run's config.json, which names the net's sizes and window.
     field_checkpoint: None, and field_name is a key of AGENTS; or (path, config) of a second
     checkpoint that plays every field seat (net against net), and field_name is its label.
-    field_name MIXED_FIELD with a field_checkpoint: the mixed table instead, that net in one
-    field seat and MIXED_FIELD_AGENTS in the others (mixed_table_differences).
+    field_name MIXED_PREFIX + a MIXED_TABLES key: that mixed table instead
+    (mixed_table_field, mixed_table_differences); field_checkpoint is its net seat or None.
     Each net is built from its own run's config, so the two may differ in size and window.
     Returns a dict: checkpoint (file name), field, mean, ci_low, ci_high (95% bootstrap CI of
     the mean), standard_deviation, seconds (play time), differences (list of num_deals floats,
@@ -147,19 +175,18 @@ def evaluate_checkpoint(task):
 
     net, history_window = load_checkpoint_net(checkpoint_path, run_config)
     test_agent = functools.partial(checkpoint_agent, net, history_window)
-    field_agents = None
-    if field_checkpoint is None:
-        field_agent = AGENTS[field_name]
-    else:
+    field_agent = None
+    if field_checkpoint is not None:
         field_path, field_config = field_checkpoint
         field_net, field_window = load_checkpoint_net(field_path, field_config)
         field_agent = functools.partial(checkpoint_agent, field_net, field_window)
-        # The mixed table: the field net takes the last field seat, the agents the others.
-        if field_name == MIXED_FIELD:
-            field_agents = []
-            for agent_name in MIXED_FIELD_AGENTS:
-                field_agents.append(AGENTS[agent_name])
-            field_agents.append(field_agent)
+
+    # A mixed table seats a list of field agents; any other field is one agent in every seat.
+    field_agents = None
+    if field_name.startswith(MIXED_PREFIX):
+        field_agents = mixed_table_field(field_name[len(MIXED_PREFIX):], field_agent)
+    elif field_agent is None:
+        field_agent = AGENTS[field_name]
 
     # False: dev deals. It is fixed here, so no argument can reach the sealed set, and
     # select_deals raises on a seed below 10.
@@ -204,10 +231,8 @@ def main():
     # Net against net: a second run's checkpoint plays every field seat. Both flags or neither.
     parser.add_argument("--field-run", help="run whose checkpoint is the field")
     parser.add_argument("--field-checkpoint", type=int, help="that checkpoint's updates done")
-    # The mixed table: that net in one field seat, heuristic and greedy in the other two.
-    parser.add_argument(
-        "--mixed", action="store_true", help="mixed table with --field-run's net (stage 5)"
-    )
+    # A mixed table (MIXED_TABLES): one agent per field seat; "styles" needs --field-run's net.
+    parser.add_argument("--mixed-table", choices=sorted(MIXED_TABLES), help="mixed table (stage 5)")
     parser.add_argument("--deals", type=int, default=1000, help="deals per (checkpoint, field)")
     parser.add_argument("--seed", type=int, default=22, help=f"dev seed, ≥ {DEV_SEED_MIN}")
     parser.add_argument("--checkpoints", help="updates-done numbers, e.g. 0,3125; default all")
@@ -222,8 +247,14 @@ def main():
     # result in one file.
     if (args.field_run is None) != (args.field_checkpoint is None):
         raise SystemExit("--field-run and --field-checkpoint go together")
-    if args.mixed and args.field_run is None:
-        raise SystemExit("--mixed needs --field-run and --field-checkpoint: the table's net")
+    # Checked here as well as in the worker, so a wrong command stops before the pool starts.
+    if args.mixed_table is not None:
+        table_has_net = MIXED_TABLE_NET in MIXED_TABLES[args.mixed_table]
+        if table_has_net != (args.field_run is not None):
+            raise SystemExit(f"--mixed-table {args.mixed_table} needs --field-run if and only if "
+                             "it has a net seat")
+        if args.fields is not None:
+            raise SystemExit("--fields and --mixed-table are separate evaluations; give one")
     field_checkpoint = None
     if args.field_run is not None:
         if args.fields is not None:
@@ -235,10 +266,12 @@ def main():
         with open(field_dir / "config.json") as file:
             field_config = json.load(file)
         field_checkpoint = (str(field_path), field_config)
-        if args.mixed:
-            field_names = [MIXED_FIELD]
+        if args.mixed_table is not None:
+            field_names = [MIXED_PREFIX + args.mixed_table]
         else:
             field_names = ["net"]
+    elif args.mixed_table is not None:
+        field_names = [MIXED_PREFIX + args.mixed_table]
     elif args.fields is None:
         field_names = ["random", "greedy"]
     else:
@@ -310,9 +343,10 @@ def main():
 
     name = f"{args.run}_eval_dev_n{args.deals}_seed{args.seed}"
     # A net-against-net result gets its own name, so it cannot replace the curve against agents.
+    # A mixed table's result names its table, so two tables never share a file.
+    if args.mixed_table is not None:
+        name += "_" + MIXED_PREFIX + args.mixed_table
     if field_checkpoint is not None:
-        if args.mixed:
-            name += "_" + MIXED_FIELD
         name += f"_vs_{args.field_run}_ckpt{args.field_checkpoint}"
     # A partial curve gets its own name, so it cannot replace the full one.
     if args.checkpoints is not None:

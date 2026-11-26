@@ -327,3 +327,77 @@ def test_script_refuses_a_test_seed():
     assert "dev seeds are" in finished.stderr
     # The refusal comes before anything is written.
     assert list(evaluate_checkpoints.RESULTS_DIR.glob(REFUSED_RUN_NAME + "*")) == []
+
+
+def test_mixed_table_seats_its_named_agents_and_the_net_only_where_listed():
+    # catches: a table seat wired to the wrong kind (the net seat given an agent, or an agent
+    # seat given the net), seats out of table order, or a net silently dropped from a no-net table.
+    net_stand_in = "the field net"
+    styles = evaluate_checkpoints.mixed_table_field("styles", net_stand_in)
+    assert styles == [AGENTS["heuristic"], AGENTS["greedy"], net_stand_in]
+    weak = evaluate_checkpoints.mixed_table_field("weak", None)
+    assert weak == [AGENTS["random"], AGENTS["greedy"], AGENTS["heuristic"]]
+    with pytest.raises(ValueError):
+        evaluate_checkpoints.mixed_table_field("weak", net_stand_in)
+    with pytest.raises(ValueError):
+        evaluate_checkpoints.mixed_table_field("styles", None)
+
+
+def test_each_mixed_table_writes_its_own_files(tmp_path):
+    # catches: two tables written to one file name (the second replaces the first), or the
+    # table missing from the field column the plots read.
+    run_name = "eval-gate-mixed-tables"
+    run_dir = evaluate_checkpoints.RUNS_DIR / run_name
+    shutil.rmtree(run_dir, ignore_errors=True)
+    run_dir.mkdir(parents=True)
+    torch.save(seeded_net().state_dict(), run_dir / "checkpoint_000000.pt")
+    run_config = {
+        "players": NUM_PLAYERS,
+        "samples_per_update": 1,
+        "git_commit": "gate",
+        "uncommitted_changes": False,
+    }
+    with open(run_dir / "config.json", "w") as file:
+        json.dump(run_config, file)
+
+    # The weak table has no net seat; the styles table seats this run's own net in it.
+    table_arguments = [
+        ["--mixed-table", "weak"],
+        ["--mixed-table", "styles", "--field-run", run_name, "--field-checkpoint", "0"],
+    ]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPO_ROOT / "src")
+    return_codes = []
+    for arguments in table_arguments:
+        finished = subprocess.run(
+            [
+                sys.executable, str(REPO_ROOT / "scripts" / "evaluate_checkpoints.py"),
+                "--run", run_name, "--deals", str(GATE_DEALS), "--seed", str(DEV_SEED),
+                "--workers", "1",
+            ] + arguments,
+            cwd=REPO_ROOT, env=environment, capture_output=True, text=True,
+        )
+        return_codes.append((finished.returncode, finished.stderr))
+
+    # Read what the asserts need, then remove the run and its results.
+    result_paths = sorted(evaluate_checkpoints.RESULTS_DIR.glob(f"{run_name}_*"))
+    fields_by_name = {}
+    for path in result_paths:
+        if path.name.endswith(".csv"):
+            with open(path) as file:
+                for row in csv.DictReader(file):
+                    fields_by_name[path.name] = row["field"]
+    for path in result_paths:
+        path.unlink()
+    shutil.rmtree(run_dir)
+
+    for return_code, stderr in return_codes:
+        assert return_code == 0, stderr
+    # Three files per table: curve, summary, per-deal.
+    assert len(result_paths) == 6
+    weak_curve = f"{run_name}_eval_dev_n{GATE_DEALS}_seed{DEV_SEED}_mixed-weak.csv"
+    styles_curve = (
+        f"{run_name}_eval_dev_n{GATE_DEALS}_seed{DEV_SEED}_mixed-styles_vs_{run_name}_ckpt0.csv"
+    )
+    assert fields_by_name[weak_curve] == "mixed-weak"
+    assert fields_by_name[styles_curve] == "mixed-styles"
