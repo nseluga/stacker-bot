@@ -20,7 +20,12 @@ import pytest
 
 from stacker.agents import random_agent
 from stacker.cards import CONFIGS, build_deck, deal_from_order
-from stacker.evaluate import bootstrap_ci, paired_differences
+from stacker.evaluate import (
+    bootstrap_ci,
+    mixed_table_agents,
+    mixed_table_differences,
+    paired_differences,
+)
 from stacker.game import Observation, new_hand, observe, play_out
 from stacker.sealed import (
     CHARS_PER_CARD,
@@ -179,3 +184,32 @@ def test_paired_differences_replay():
     first = paired_differences(deck_orders, 4, random_agent, random_agent, (0, 2), seed=10)
     again = paired_differences(deck_orders, 4, random_agent, random_agent, (0, 2), seed=10)
     assert first == again
+
+
+# Stand-in field styles for the mixed-table seating check: only identity matters there.
+MIXED_STYLES = ["style_a", "style_b", "style_c"]
+
+
+def test_mixed_table_seats_each_style_once_per_field_seat():
+    # catches: a shift that does not rotate the styles (one style keeps the seat after the test
+    # agent), or the test agent written over a field seat.
+    for test_seat in range(4):
+        styles_by_seat = {}
+        for shift in range(len(MIXED_STYLES)):
+            agents = mixed_table_agents("test", MIXED_STYLES, test_seat, shift)
+            assert agents[test_seat] == "test"
+            for seat in range(4):
+                if seat != test_seat:
+                    styles_by_seat.setdefault(seat, []).append(agents[seat])
+        for seat in styles_by_seat:
+            assert sorted(styles_by_seat[seat]) == MIXED_STYLES
+
+
+def test_mixed_table_same_agent_everywhere_gives_exactly_zero():
+    # catches: the wrong fair share, the test agent's points read from the wrong seat, or a
+    # test seat skipped. One deterministic agent in every seat plays the same game each time,
+    # so the test seat covers every seat equally and collects exactly the fair share.
+    deck_orders = dev_deck_orders(4, EXACT_ZERO_DEALS, seed=10)
+    field_agents = [first_legal_agent, first_legal_agent, first_legal_agent]
+    differences = mixed_table_differences(deck_orders, 4, first_legal_agent, field_agents, 10)
+    assert differences == [0.0] * EXACT_ZERO_DEALS

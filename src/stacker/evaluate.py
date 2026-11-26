@@ -115,6 +115,74 @@ def paired_differences(deck_orders, num_players, test_agent, field_agent, test_s
     return differences
 
 
+def mixed_table_agents(test_agent, field_agents, test_seat, shift):
+    """
+    The agent in each seat of one mixed-table game (stage plan specialist_explore, stage 5,
+    "Mixed table"): the test agent in test_seat, one field agent of each style in the others.
+    test_agent: agent(observation, actions, rng) -> one of actions.
+    field_agents: list of num_players - 1 agents, one per style (e.g. heuristic, greedy, a net).
+    test_seat: 0..num_players - 1. shift: 0..len(field_agents) - 1.
+    Returns a list of num_players agents, one per seat.
+
+    Going round the table from the seat after test_seat, the field seats take field_agents in
+    order, starting at field_agents[shift]. Over the shifts each style sits once in each field
+    seat, so no style keeps the seat right after (or right before) the test agent.
+    """
+    num_players = len(field_agents) + 1
+    agents = []
+    for _ in range(num_players):
+        agents.append(None)
+    agents[test_seat] = test_agent
+    for offset in range(1, num_players):
+        seat = (test_seat + offset) % num_players
+        agents[seat] = field_agents[(offset - 1 + shift) % len(field_agents)]
+    return agents
+
+
+def mixed_table_differences(deck_orders, num_players, test_agent, field_agents, seed):
+    """
+    Per deal: the test agent's mean points per hand at a mixed table, minus its fair share
+    (POINTS_PER_HAND / num_players). Returns a list of floats in deal order.
+    deck_orders: list of deals, each a list of Cards; its position is its deal_index.
+    field_agents: one agent per field seat (num_players - 1), each a different style.
+    seed: names the agent rng, as in rotation_scores.
+
+    Each deal is played num_players * len(field_agents) times: the test agent in every seat,
+    and for each of those every shift of mixed_table_agents. 12 games per deal at 4 players.
+
+    Unlike paired_differences, this is not a difference against the field: no single field
+    agent exists whose share is known. It is only read as a difference of two test agents on the
+    same deals and seatings (arm minus control), where the fair share cancels. Each game's rng
+    is named by seed, deal, seat and shift, never by the test agent, so two test agents meet
+    the same random draws from the field.
+    """
+    if len(field_agents) != num_players - 1:
+        raise ValueError(
+            f"a mixed table needs {num_players - 1} field agents, got {len(field_agents)}"
+        )
+    num_decks = CONFIGS[num_players].num_decks
+    fair_share = POINTS_PER_HAND / num_players
+
+    differences = []
+    for deal_index, deck_order in enumerate(deck_orders):
+        total_points = 0
+        games = 0
+        for test_seat in range(num_players):
+            for shift in range(len(field_agents)):
+                agents = mixed_table_agents(test_agent, field_agents, test_seat, shift)
+                # A fresh state per game, because play_out changes the state in place.
+                dealt = deal_from_order(deck_order, num_players)
+                state = HandState(
+                    dealt.hands, num_decks, dealt.leader_seat, dealt.opening_card, dealt.aside
+                )
+                agent_rng = random.Random(f"{seed}:{deal_index}:{test_seat}:mixed{shift}")
+                _trace, seat_points = play_out(state, agents, agent_rng)
+                total_points += seat_points[test_seat]
+                games += 1
+        differences.append(total_points / games - fair_share)
+    return differences
+
+
 def bootstrap_ci(values, rng):
     """
     Mean and percentile-bootstrap 95% CI of values (the per-deal differences).
