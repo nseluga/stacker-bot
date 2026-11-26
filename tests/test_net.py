@@ -94,6 +94,20 @@ LABEL_TOLERANCE = 1e-3
 HAND_SET_LOGITS = (0.5, -1.0, 1.5)
 # How close the classifier must get to the labels' mean entropy in the overfit gate.
 CLASSIFIER_OVERFIT_GAP = 0.02
+# A 3-decision batch with 2 actions each, for the known-value loss gate: made-up logits
+# [3, 2, 3], one return of each score, and taken columns that are not all the same.
+KNOWN_LOGITS = (
+    ((0.2, -0.4, 1.1), (1.5, 0.3, -0.7)),
+    ((-1.0, 0.8, 0.1), (0.6, 0.6, -0.2)),
+    ((0.9, -0.3, 0.4), (-0.5, 1.2, 0.7)),
+)
+KNOWN_TAKEN = (1, 0, 1)
+KNOWN_RETURNS = (0.0, 1.0, 2.0)
+# Spec part 18's bin edges and sigma, restated here so the expected value does not use the
+# code under test.
+SPEC_EDGES = (-0.5, 0.5, 1.5, 2.5)
+SPEC_SIGMA = 0.75
+KNOWN_LOSS_TOLERANCE = 1e-5
 
 
 def real_decisions(num_players):
@@ -453,3 +467,37 @@ def test_classifier_fits_a_batch_down_to_the_label_entropy():
     labels = hl_gauss_labels(returns)
     mean_entropy = -(labels * labels.log()).sum(dim=1).mean().item()
     assert loss.item() - mean_entropy < CLASSIFIER_OVERFIT_GAP
+
+
+def normal_cdf(value):
+    """The standard normal's cumulative probability at value, from the error function."""
+    return 0.5 * (1 + math.erf(value / math.sqrt(2)))
+
+
+def test_placement_loss_matches_a_hand_worked_value():
+    # catches: the loss trained on other labels than HL-Gauss (one-hot, unrenormalized), or a
+    # sum or a mean over the wrong axis.
+    logits = torch.tensor(KNOWN_LOGITS)
+    taken_index = torch.tensor(KNOWN_TAKEN)
+    returns = torch.tensor(KNOWN_RETURNS)
+
+    # The expected loss in plain math: per decision, the label is the normal's mass in each
+    # bin, rescaled to sum to 1; the loss is -sum(label * log softmax(taken logits)).
+    total = 0.0
+    for decision in range(len(KNOWN_TAKEN)):
+        edge_cdf = []
+        for edge in SPEC_EDGES:
+            edge_cdf.append(normal_cdf((edge - KNOWN_RETURNS[decision]) / SPEC_SIGMA))
+        inside_mass = edge_cdf[-1] - edge_cdf[0]
+        taken_logits = KNOWN_LOGITS[decision][KNOWN_TAKEN[decision]]
+        log_normalizer = 0.0
+        for logit in taken_logits:
+            log_normalizer += math.exp(logit)
+        log_normalizer = math.log(log_normalizer)
+        for class_index in range(len(taken_logits)):
+            label = (edge_cdf[class_index + 1] - edge_cdf[class_index]) / inside_mass
+            total -= label * (taken_logits[class_index] - log_normalizer)
+    expected = total / len(KNOWN_TAKEN)
+
+    loss = placement_loss(logits, taken_index, returns).item()
+    assert abs(loss - expected) < KNOWN_LOSS_TOLERANCE

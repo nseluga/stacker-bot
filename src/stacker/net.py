@@ -215,7 +215,7 @@ class QNet(nn.Module):
             # The one output is Q itself.
             q_values = outputs.squeeze(-1)  # [B, K, 1] -> [B, K]
         else:
-            # Spec part 17: softmax turns the three logits into placement probabilities that sum
+            # Spec part 18: softmax turns the three logits into placement probabilities that sum
             # to 1, and Q is the score they imply on average: 2 * P(1st) + 1 * P(2nd) + 0.
             probabilities = torch.softmax(outputs, dim=-1)  # [B, K, 3]
             q_values = (

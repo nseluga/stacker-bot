@@ -66,6 +66,9 @@ GATES_FILES = (
 )
 # The screen line for a bug that turned no gate red; resumed rows need it to read as green.
 NO_GATE_FAILED = "no gate failed"
+# Starts the line printed when a bug's text cannot be planted. Such a bug never ran, so a resume
+# must plant it again rather than copy the line as its gates.
+PLANT_ERROR = "text found "
 # Separates the failed gates on one screen line (gate names never contain it).
 GATES_SEPARATOR = ", "
 # Longest one gate run may take before it is recorded as hung (a normal run is about 40 s).
@@ -350,6 +353,18 @@ MUTATIONS = (
         "        head=HEAD_MSE,\n",
     ),
     (
+        "placement loss trains on one-hot labels",
+        NET,
+        "    labels = hl_gauss_labels(returns)\n",
+        "    labels = nn.functional.one_hot(returns.long(), PLACEMENT_CLASSES).float()\n",
+    ),
+    (
+        "script passes the chair to train as False",
+        TRAIN_SCRIPT,
+        '        heuristic_chair=config.get("heuristic_chair", False),\n',
+        "        heuristic_chair=False,\n",
+    ),
+    (
         "learning rate ignored",
         DMC,
         "            lr=learning_rate,\n            alpha=RMSPROP_ALPHA,",
@@ -577,7 +592,8 @@ def rows_from_log(log_text, names):
     Reads the finished bugs out of an earlier run's screen output.
     log_text: str, what main printed, one "<bug name>: <failed gates>" line per finished bug.
     names: the bug names this run would plant.
-    Returns a dict from bug name to its list of failed gates, for every name with a line.
+    Returns a dict from bug name to its list of failed gates, for every name with a line,
+    except a name whose line says its text could not be planted: that bug never ran.
     A line is matched by its known name, not by splitting at ":", since some names hold commas.
     """
     finished = {}
@@ -587,6 +603,8 @@ def rows_from_log(log_text, names):
             if not line.startswith(prefix):
                 continue
             verdict = line[len(prefix):]
+            if verdict.startswith(PLANT_ERROR):
+                continue
             if verdict == NO_GATE_FAILED:
                 finished[name] = []
             else:
@@ -676,7 +694,7 @@ def main():
                 # spot, so a text that is missing, or matches twice, stops the script.
                 if source.count(old_text) != 1:
                     raise SystemExit(
-                        f"{name}: text found {source.count(old_text)} times in {relative_path}"
+                        f"{name}: {PLANT_ERROR}{source.count(old_text)} times in {relative_path}"
                     )
                 target.write_text(source.replace(old_text, new_text))
 

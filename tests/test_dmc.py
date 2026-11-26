@@ -1403,3 +1403,30 @@ def test_actor_flags_need_fast_actor():
     # catches: --actor-hands given without --fast-actor and silently ignored by train.
     with pytest.raises(SystemExit):
         train_dmc.fast_actor_settings(fast_flags(False, actor_hands=8))
+
+
+class TrainReached(Exception):
+    """Raised by the stand-in train, so main stops once it has handed over its settings."""
+
+
+def test_train_script_hands_its_flags_to_train(monkeypatch, tmp_path):
+    # catches: the script writing a flag into config.json but handing train() the default, so
+    # the run records the arm and trains the control.
+    received = {}
+
+    def recording_train(*args, **kwargs):
+        received.update(kwargs)
+        raise TrainReached
+
+    # The run directory goes to a temporary folder, and train is replaced, so nothing trains.
+    monkeypatch.setattr(train_dmc, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(train_dmc, "train", recording_train)
+    monkeypatch.setattr(sys, "argv", [
+        "train_dmc.py", "--seed", str(DEV_SEED), "--actors", "1", "--updates", "1",
+        "--heuristic-chair", "--head", "classifier",
+    ])
+    with pytest.raises(TrainReached):
+        train_dmc.main()
+
+    assert received["heuristic_chair"] is True
+    assert received["head"] == HEAD_CLASSIFIER
