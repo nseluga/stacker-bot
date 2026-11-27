@@ -365,6 +365,31 @@ MUTATIONS = (
         "        heuristic_chair=False,\n",
     ),
     (
+        "reuse pool keeps only the latest batch",
+        DMC,
+        "                self.samples.append(sample)\n",
+        "                self.samples.append(sample)\n"
+        "                self.samples = self.samples[-len(samples):]\n",
+    ),
+    (
+        "reuse pool never overwrites once full",
+        DMC,
+        "                self.samples[self.next_slot] = sample\n",
+        "                pass\n",
+    ),
+    (
+        "samples_total counts reused samples",
+        DMC,
+        '"samples_total": updates_done * samples_per_update,',
+        '"samples_total": updates_done * samples_per_update * (1 + reuse_updates),',
+    ),
+    (
+        "script passes reuse to train as 0",
+        TRAIN_SCRIPT,
+        '        reuse_updates=config.get("reuse_updates", CONTROL_REUSE_UPDATES),\n',
+        "        reuse_updates=CONTROL_REUSE_UPDATES,\n",
+    ),
+    (
         "learning rate ignored",
         DMC,
         "            lr=learning_rate,\n            alpha=RMSPROP_ALPHA,",

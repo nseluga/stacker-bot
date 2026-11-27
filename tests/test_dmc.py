@@ -50,6 +50,7 @@ import train_dmc  # noqa: E402
 from evaluate_checkpoints import load_checkpoint_net  # noqa: E402
 
 from stacker.dmc import (
+    ReusePool,
     EPSILON,
     FAST_ACTOR_HANDS,
     LEARNING_RATE,
@@ -1405,6 +1406,10 @@ def test_actor_flags_need_fast_actor():
         train_dmc.fast_actor_settings(fast_flags(False, actor_hands=8))
 
 
+# Off the default pool size, so a size dropped on the way to train() shows.
+SCRIPT_REUSE_POOL_SAMPLES = 5000
+
+
 class TrainReached(Exception):
     """Raised by the stand-in train, so main stops once it has handed over its settings."""
 
@@ -1424,9 +1429,75 @@ def test_train_script_hands_its_flags_to_train(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", [
         "train_dmc.py", "--seed", str(DEV_SEED), "--actors", "1", "--updates", "1",
         "--heuristic-chair", "--head", "classifier",
+        "--reuse-updates", "1", "--reuse-pool-samples", str(SCRIPT_REUSE_POOL_SAMPLES),
     ])
     with pytest.raises(TrainReached):
         train_dmc.main()
 
     assert received["heuristic_chair"] is True
     assert received["head"] == HEAD_CLASSIFIER
+    assert received["reuse_updates"] == 1
+    assert received["reuse_pool_samples"] == SCRIPT_REUSE_POOL_SAMPLES
+
+
+def test_reuse_pool_keeps_the_newest_samples():
+    # catches: the oldest sample never overwritten once full, or the slot going round wrong.
+    pool = ReusePool(capacity=3)
+    pool.add([0, 1, 2, 3, 4])
+    assert sorted(pool.samples) == [2, 3, 4]
+    pool.add([5])
+    assert sorted(pool.samples) == [3, 4, 5]
+
+
+def test_reuse_pool_draws_only_samples_it_holds():
+    # catches: a draw over the whole capacity before the pool is full (empty or missing slots).
+    pool = ReusePool(capacity=10)
+    pool.add(["a", "b", "c"])
+    drawn = pool.draw(100, random.Random(0))
+    assert len(drawn) == 100
+    assert set(drawn) <= {"a", "b", "c"}
+
+
+def test_train_reuse_adds_pool_updates_and_counts_fresh_samples(tmp_path, monkeypatch):
+    # catches: reused samples counted in samples_total (shifts every plot by samples and the
+    #   checkpoint names); the extra update skipped or made more than once per fresh batch.
+    # catches: reuse drawing only from the latest fresh batch instead of the pool: at update 2
+    #   a pool of 2 batches gives each draw a 1 in 2 chance of an older sample, so all 256
+    #   draws missing batch 1 has odds of 2^-256.
+    learner_batches = []
+
+    def recording_learner_step(q_net, optimizer, samples):
+        learner_batches.append(samples)
+        return 1.0, 2.0
+
+    monkeypatch.setattr("stacker.dmc.learner_step", recording_learner_step)
+    train(
+        DEV_SEED,
+        SMOKE_ACTORS,
+        tmp_path,
+        SMOKE_UPDATES,
+        samples_per_update=SMOKE_SAMPLES_PER_UPDATE,
+        checkpoint_every=SMOKE_UPDATES,
+        reuse_updates=1,
+    )
+    log_lines = []
+    with open(tmp_path / "log.jsonl") as log_file:
+        for line in log_file:
+            log_lines.append(json.loads(line))
+
+    # One fresh and one reused batch per update, in that order.
+    assert len(learner_batches) == 2 * SMOKE_UPDATES
+    assert log_lines[-1]["samples_total"] == SMOKE_UPDATES * SMOKE_SAMPLES_PER_UPDATE
+    assert log_lines[-1]["reuse_loss"] == 1.0
+    assert log_lines[-1]["reuse_gradient_norm"] == 2.0
+
+    # The pool holds the very sample objects trained on, so identity says where a draw came from.
+    first_fresh_ids = set()
+    for sample in learner_batches[0]:
+        first_fresh_ids.add(id(sample))
+    second_reuse_batch = learner_batches[3]
+    from_first_batch = 0
+    for sample in second_reuse_batch:
+        if id(sample) in first_fresh_ids:
+            from_first_batch += 1
+    assert from_first_batch > 0

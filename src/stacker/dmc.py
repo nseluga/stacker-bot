@@ -18,6 +18,8 @@ pieces, in build order:
 - The lockstep hands: advance_slots moves every hand an actor holds (a HandSlot each) one
   decision with one choose_actions_batched call, and returns the samples of the hands that end.
 - The batch: collate_samples stacks samples into the tensors the net and the loss take.
+- The reuse pool: ReusePool keeps the most recent samples so the learner can train on them
+  again (set 12, sample reuse); draw takes a random batch from it.
 - The update: learner_step changes the weights once, so that the Q of each action played moves
   toward the score its hand gave. The size of one change is capped (gradient clipping).
 - The loop, one process: train_one_process alternates the two, playing hands until a batch of
@@ -89,6 +91,14 @@ SAMPLES_PER_UPDATE = 3200
 # about 1.4 updates' worth, close to DouZero's 50 buffers of 100 steps (1.5), so queued samples
 # are at most a couple of updates older than the weights. About 64 MB when full.
 QUEUE_MAX_HANDS = 64
+# Sample reuse (set 12, decision log 2026-11-26): the pool keeps the most recent samples, and
+# each fresh batch is followed by this many extra updates on batches drawn from it. The control
+# makes none. With one extra update every sample is drawn about once more while it is in the
+# pool, whatever the pool's size: each batch draws SAMPLES_PER_UPDATE of the pool's samples and a
+# sample stays for pool_samples / SAMPLES_PER_UPDATE batches. The size only sets how old the
+# reused samples get: 1M is about 310 batches. About 15 GB held in memory when full.
+CONTROL_REUSE_UPDATES = 0
+REUSE_POOL_SAMPLES = 1_000_000
 # Longest the learner waits for one hand before the run fails. A hand takes well under a second,
 # so a wait this long means the actors have died, and stopping beats hanging without a word.
 QUEUE_TIMEOUT_SECONDS = 60
@@ -418,6 +428,38 @@ def shuffle_returns(samples, rng):
             (state_vector, history, history_mask, taken_action, shuffled[index])
         )
     return shuffled_samples
+
+
+class ReusePool:
+    """
+    The most recent samples the learner has trained on, for sample reuse (set 12).
+    capacity: how many samples it holds. Once full, each new sample takes the slot of the oldest
+      one, so the pool always holds the last `capacity` samples added.
+    """
+
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.samples = []
+        # The slot the next sample goes in. Before the pool is full it is the end of the list;
+        # after, it goes round the list, and the slot it points at always holds the oldest one.
+        self.next_slot = 0
+
+    def add(self, samples):
+        """Adds a list of samples, overwriting the oldest once the pool is full."""
+        for sample in samples:
+            if len(self.samples) < self.capacity:
+                self.samples.append(sample)
+            else:
+                self.samples[self.next_slot] = sample
+            self.next_slot = (self.next_slot + 1) % self.capacity
+
+    def draw(self, batch_size, rng):
+        """
+        Returns batch_size samples drawn at random from the pool, with replacement, so a draw
+        works from the first batch on, even before the pool holds batch_size samples.
+        rng: a random.Random, so a seed replays the draws.
+        """
+        return rng.choices(self.samples, k=batch_size)
 
 
 def learner_step(q_net, optimizer, samples):
@@ -829,6 +871,8 @@ def train(
     actor_devices=("cpu",),
     heuristic_chair=False,
     head=HEAD_MSE,
+    reuse_updates=CONTROL_REUSE_UPDATES,
+    reuse_pool_samples=REUSE_POOL_SAMPLES,
 ):
     """
     Runs the training loop with actors in their own processes (spec parts 7-9 and 12).
@@ -863,6 +907,13 @@ def train(
       is False.
     heuristic_chair: True seats heuristic_agent in one random seat of every hand (set 8); only
       the actor_loop path has the chair, so it is refused with fast_actor.
+    reuse_updates: extra updates after each fresh batch, each on samples_per_update samples
+      drawn from a ReusePool of the last reuse_pool_samples samples trained on (set 12). 0, the
+      control, makes no pool. An update in the log is one fresh batch with its extra updates:
+      update, samples_total and the checkpoint names count fresh samples only, so a reuse run
+      lines up with the control on every plot by samples.
+    Each log line also has reuse_loss and reuse_gradient_norm: the mean over this update's
+      extra updates, or None when reuse_updates is 0.
     Each log line also has actor_lag_mean and actor_lag_max: over the hands this update took,
       how many updates older than the learner's the weights that finished each hand were. Both
       are None when fast_actor is False.
@@ -967,6 +1018,13 @@ def train(
     if shuffle_control:
         shuffle_rng = random.Random(f"shuffle:{seed}")
 
+    # The reuse pool and its own stream, named so its draws share nothing with any other stream.
+    reuse_pool = None
+    reuse_rng = None
+    if reuse_updates > 0:
+        reuse_pool = ReusePool(reuse_pool_samples)
+        reuse_rng = random.Random(f"reuse:{seed}")
+
     # Samples received but not yet trained on; what is left after a batch starts the next one.
     waiting_samples = []
     samples_by_actor = []
@@ -999,6 +1057,21 @@ def train(
                 learner_start = time.perf_counter()
                 loss, gradient_norm = learner_step(q_net, run_optimizer, batch)
 
+                # Sample reuse: the fresh batch joins the pool first, so from the first update on
+                # there is something to draw. The extra updates run before the weights are
+                # copied, so the actors next play with weights that include all of them.
+                reuse_losses = []
+                reuse_gradient_norms = []
+                if reuse_pool is not None:
+                    reuse_pool.add(batch)
+                    for _ in range(reuse_updates):
+                        reuse_batch = reuse_pool.draw(samples_per_update, reuse_rng)
+                        reuse_loss, reuse_gradient_norm = learner_step(
+                            q_net, run_optimizer, reuse_batch
+                        )
+                        reuse_losses.append(reuse_loss)
+                        reuse_gradient_norms.append(reuse_gradient_norm)
+
                 # Equation 12: the new weights go where the actors read them. Fast actors copy
                 # from one shared net per device; the old actors play on actor_net itself, so
                 # its memory is written in place and their next forward pass uses it.
@@ -1018,6 +1091,15 @@ def train(
                     batch_returns.append(hand_return)
                 return_variance = float(torch.tensor(batch_returns).var(correction=0))
 
+                # None when the run makes no extra updates.
+                reuse_loss_mean = None
+                reuse_gradient_norm_mean = None
+                if len(reuse_losses) > 0:
+                    reuse_loss_mean = sum(reuse_losses) / len(reuse_losses)
+                    reuse_gradient_norm_mean = sum(reuse_gradient_norms) / len(
+                        reuse_gradient_norms
+                    )
+
                 # None on the old path, where no hand carries a version.
                 actor_lag_mean = None
                 actor_lag_max = None
@@ -1026,16 +1108,20 @@ def train(
                     actor_lag_max = max(hand_lags)
 
                 # wait_seconds is time spent short of samples (the actors are the limit);
-                # learner_seconds is the update and the copy (the learner is the limit).
+                # learner_seconds is the update, any extra reuse updates, and the copy (the
+                # learner is the limit).
                 # Whichever is larger names the bottleneck.
                 updates_done = update_index + 1
                 log_line = {
                     "update": updates_done,
-                    # Samples trained on so far: the x-axis of the learning curve.
+                    # Fresh samples trained on so far, reused ones not counted: the x-axis of the
+                    # learning curve.
                     "samples_total": updates_done * samples_per_update,
                     "loss": loss,
                     "return_variance": return_variance,
                     "gradient_norm": gradient_norm,
+                    "reuse_loss": reuse_loss_mean,
+                    "reuse_gradient_norm": reuse_gradient_norm_mean,
                     "wait_seconds": learner_start - update_start,
                     "learner_seconds": update_end - learner_start,
                     "samples_per_second": samples_per_update / (update_end - update_start),

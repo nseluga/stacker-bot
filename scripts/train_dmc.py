@@ -17,6 +17,9 @@ An exploration arm (stage 5, spec parts 16-17): any of --width, --layers, --hist
 The classifier head (set 9, spec part 18): the net predicts the chance of each placement and
 learns from smoothed placement labels instead of the score itself:
     ... --head classifier --arm head-classifier --base-run <the base run's name>
+Sample reuse (set 12): after each fresh batch, one extra update on a batch drawn from the last
+1M samples trained on (--reuse-pool-samples changes the pool's size):
+    ... --reuse-updates 1 --arm reuse1 --base-run <the base run's name>
 The fast actor (design C, decision log 2026-11-25): each actor plays many hands at once on its
 own net on a GPU, refreshed from the learner every update:
     ... --fast-actor --actors 16 --actor-hands 64 --actor-devices cuda:0,cuda:1 --device cuda:0
@@ -54,6 +57,7 @@ from stacker.dmc import (
     ADAM_EPS,
     CHECKPOINT_EVERY_UPDATES,
     CONTROL_OPTIMIZER,
+    CONTROL_REUSE_UPDATES,
     EPSILON,
     FAST_ACTOR_HANDS,
     LEARNING_RATE,
@@ -63,6 +67,7 @@ from stacker.dmc import (
     RMSPROP_ALPHA,
     RMSPROP_EPS,
     RMSPROP_MOMENTUM,
+    REUSE_POOL_SAMPLES,
     SAMPLES_PER_UPDATE,
     train,
 )
@@ -224,6 +229,19 @@ def main():
         action="store_true",
         help="one random seat per hand played by the heuristic (set 8)",
     )
+    # The pool size defaults to None so a size given without --reuse-updates can be told apart
+    # from no size, and refused.
+    parser.add_argument(
+        "--reuse-updates",
+        type=int,
+        default=CONTROL_REUSE_UPDATES,
+        help="extra updates per fresh batch on samples drawn from the reuse pool (set 12)",
+    )
+    parser.add_argument(
+        "--reuse-pool-samples",
+        type=int,
+        help=f"samples the reuse pool holds (default {REUSE_POOL_SAMPLES})",
+    )
     parser.add_argument("--arm", help="arm tag, added to the run name: a-z, 0-9 and -")
     parser.add_argument(
         "--base-run", help="the run this arm is compared with, a name under runs/specialist_explore/"
@@ -247,6 +265,9 @@ def main():
         raise SystemExit(f"--device {args.device}: torch finds no CUDA GPU on this machine")
     fast_entries, fast_named_keys = fast_actor_settings(args)
     # train refuses this pair too, but only after the run's directory and config exist.
+    # train would ignore a pool size with no extra updates, and the run would not be the one asked.
+    if args.reuse_pool_samples is not None and args.reuse_updates == 0:
+        raise SystemExit("--reuse-pool-samples needs --reuse-updates")
     if args.heuristic_chair and args.fast_actor:
         raise SystemExit("--heuristic-chair runs on today's actor only; drop --fast-actor")
     if fast_actor_settings_use_cuda(fast_entries) and not torch.cuda.is_available():
@@ -342,6 +363,15 @@ def main():
     # existed and still matches the base runs made then.
     if args.head == HEAD_CLASSIFIER:
         config["head"] = HEAD_CLASSIFIER
+    # Only a reuse run has these keys, so a control config still matches the base runs. The pool
+    # size is part of the arm --reuse-updates names, so it is named with it.
+    reuse_named_keys = set()
+    if args.reuse_updates > 0:
+        config["reuse_updates"] = args.reuse_updates
+        config["reuse_pool_samples"] = REUSE_POOL_SAMPLES
+        if args.reuse_pool_samples is not None:
+            config["reuse_pool_samples"] = args.reuse_pool_samples
+        reuse_named_keys = {"reuse_updates", "reuse_pool_samples"}
     if args.base_run is not None:
         base_config_path = RUNS_DIR / args.base_run / "config.json"
         if not base_config_path.exists():
@@ -357,6 +387,7 @@ def main():
                     if word == option or word.startswith(option + "="):
                         named_keys.add(CONFIG_KEY_OF_FLAG.get(action.dest, action.dest))
         named_keys |= fast_named_keys
+        named_keys |= reuse_named_keys
         check_against_base(config, base_config, named_keys)
 
     # Made only now, so a refused run leaves no directory behind.
@@ -395,6 +426,9 @@ def main():
         heuristic_chair=config.get("heuristic_chair", False),
         # A config without the key is an mse run.
         head=config.get("head", HEAD_MSE),
+        # Only a reuse run's config has the keys; without them train makes no extra updates.
+        reuse_updates=config.get("reuse_updates", CONTROL_REUSE_UPDATES),
+        reuse_pool_samples=config.get("reuse_pool_samples", REUSE_POOL_SAMPLES),
     )
 
     # Summary from the log train wrote. The first update's time includes starting the actor
