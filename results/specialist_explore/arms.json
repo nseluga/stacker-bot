@@ -35,6 +35,11 @@
         "label": "W1024 lr3e-4",
         "run": "4p1d_dmc_teapot_a24_u37500_seed20_width1024-lr3e-4",
         "second_seed_run": null
+      },
+      {
+        "label": "W512 lr1e-3",
+        "run": "4p1d_dmc_teapot_a24_u37500_seed20_lr1e-3",
+        "second_seed_run": null
       }
     ],
     "optimizer": [
