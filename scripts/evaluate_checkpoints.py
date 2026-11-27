@@ -35,7 +35,13 @@ from train_dmc import RUNS_DIR
 from stacker.dmc import choose_action
 from stacker.encode import HISTORY_WINDOW, encode_decision
 from stacker.evaluate import bootstrap_ci, mixed_table_differences, paired_differences
-from stacker.net import DEFAULT_HIDDEN_LAYERS, DEFAULT_HISTORY_HIDDEN, DEFAULT_MLP_WIDTH, QNet
+from stacker.net import (
+    DEFAULT_HIDDEN_LAYERS,
+    DEFAULT_HISTORY_HIDDEN,
+    DEFAULT_MLP_WIDTH,
+    HEAD_MSE,
+    QNet,
+)
 
 # Evaluation plays the net's best action on every turn: no random moves (equation 15).
 EVAL_EPSILON = 0.0
@@ -97,10 +103,14 @@ def load_checkpoint_net(path, config):
     # A size that does not match the saved weights makes load_state_dict raise, so a wrong size
     # fails loudly. A wrong window would not (the LSTM reads any number of rows), which is why
     # the window is returned from the same config instead of left to a default.
+    # The head is read from the run's own config: only a classifier run has the key, so any
+    # other run, older ones included, is an mse net. A wrong head also fails loudly, since the
+    # last layer's size (1 or 3 outputs) would not match the saved weights.
     net = QNet(
         width=net_config["width"],
         hidden_layers=net_config["hidden_layers"],
         history_hidden=net_config["history_hidden"],
+        head=config.get("head", HEAD_MSE),
     )
     # map_location: a checkpoint is saved from the CPU copy, but loading must not depend on it.
     # weights_only: the file holds tensors only, so torch refuses to run any code stored in it.

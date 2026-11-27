@@ -66,6 +66,9 @@ GATES_FILES = (
 )
 # The screen line for a bug that turned no gate red; resumed rows need it to read as green.
 NO_GATE_FAILED = "no gate failed"
+# Starts the line printed when a bug's text cannot be planted. Such a bug never ran, so a resume
+# must plant it again rather than copy the line as its gates.
+PLANT_ERROR = "text found "
 # Separates the failed gates on one screen line (gate names never contain it).
 GATES_SEPARATOR = ", "
 # Longest one gate run may take before it is recorded as hung (a normal run is about 40 s).
@@ -207,8 +210,8 @@ MUTATIONS = (
     (
         "train starts from another seed",
         DMC,
-        "    torch.manual_seed(seed)\n    q_net = QNet(width=width,",
-        "    torch.manual_seed(seed + 1)\n    q_net = QNet(width=width,",
+        "    torch.manual_seed(seed)\n    q_net = QNet(\n        width=width,",
+        "    torch.manual_seed(seed + 1)\n    q_net = QNet(\n        width=width,",
     ),
     (
         "checkpoint 0 is not the starting net",
@@ -308,6 +311,60 @@ MUTATIONS = (
         '        config["heuristic_chair"] = False\n',
     ),
     (
+        "classifier Q weights neither as first",
+        NET,
+        "CLASS_FIRST * probabilities[..., CLASS_FIRST]",
+        "CLASS_FIRST * probabilities[..., CLASS_NEITHER]",
+    ),
+    (
+        "HL-Gauss labels not renormalized",
+        NET,
+        "    return bin_mass / inside_mass\n",
+        "    return bin_mass\n",
+    ),
+    (
+        "learner trains the classifier with MSE on Q",
+        DMC,
+        "    if q_net.head == HEAD_CLASSIFIER:\n",
+        "    if False:\n",
+    ),
+    (
+        "placement loss always reads action 0",
+        NET,
+        "    index = taken_index.view(-1, 1, 1)",
+        "    index = torch.zeros_like(taken_index).view(-1, 1, 1)",
+    ),
+    (
+        "train builds the nets without the head",
+        DMC,
+        "history_hidden=history_hidden, head=head\n    )\n\n    # The actors' net",
+        "history_hidden=history_hidden\n    )\n\n    # The actors' net",
+    ),
+    (
+        "script drops the head key",
+        TRAIN_SCRIPT,
+        '        config["head"] = HEAD_CLASSIFIER\n',
+        "        pass\n",
+    ),
+    (
+        "eval builds every net as mse",
+        EVAL_SCRIPT,
+        '        head=config.get("head", HEAD_MSE),\n',
+        "        head=HEAD_MSE,\n",
+    ),
+    (
+        "placement loss trains on one-hot labels",
+        NET,
+        "    labels = hl_gauss_labels(returns)\n",
+        "    labels = nn.functional.one_hot(returns.long(), PLACEMENT_CLASSES).float()\n",
+    ),
+    (
+        "script passes the chair to train as False",
+        TRAIN_SCRIPT,
+        '        heuristic_chair=config.get("heuristic_chair", False),\n',
+        "        heuristic_chair=False,\n",
+    ),
+    (
         "learning rate ignored",
         DMC,
         "            lr=learning_rate,\n            alpha=RMSPROP_ALPHA,",
@@ -324,8 +381,8 @@ MUTATIONS = (
         EVAL_SCRIPT,
         '    net = QNet(\n        width=net_config["width"],\n'
         '        hidden_layers=net_config["hidden_layers"],\n'
-        '        history_hidden=net_config["history_hidden"],\n    )',
-        "    net = QNet()",
+        '        history_hidden=net_config["history_hidden"],\n',
+        "    net = QNet(\n",
     ),
     (
         "field net built from the tested run's config",
@@ -535,7 +592,8 @@ def rows_from_log(log_text, names):
     Reads the finished bugs out of an earlier run's screen output.
     log_text: str, what main printed, one "<bug name>: <failed gates>" line per finished bug.
     names: the bug names this run would plant.
-    Returns a dict from bug name to its list of failed gates, for every name with a line.
+    Returns a dict from bug name to its list of failed gates, for every name with a line,
+    except a name whose line says its text could not be planted: that bug never ran.
     A line is matched by its known name, not by splitting at ":", since some names hold commas.
     """
     finished = {}
@@ -545,6 +603,8 @@ def rows_from_log(log_text, names):
             if not line.startswith(prefix):
                 continue
             verdict = line[len(prefix):]
+            if verdict.startswith(PLANT_ERROR):
+                continue
             if verdict == NO_GATE_FAILED:
                 finished[name] = []
             else:
@@ -634,7 +694,7 @@ def main():
                 # spot, so a text that is missing, or matches twice, stops the script.
                 if source.count(old_text) != 1:
                     raise SystemExit(
-                        f"{name}: text found {source.count(old_text)} times in {relative_path}"
+                        f"{name}: {PLANT_ERROR}{source.count(old_text)} times in {relative_path}"
                     )
                 target.write_text(source.replace(old_text, new_text))
 

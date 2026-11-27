@@ -14,6 +14,9 @@ The label-shuffle control (stage 4, spec part 13), the same run with the returns
 An exploration arm (stage 5, spec parts 16-17): any of --width, --layers, --history-hidden,
 --history-window, --lr, --epsilon, --optimizer, each defaulting to the control, plus --arm, a tag for the run:
     ... --width 256 --lr 3e-4 --arm width256-lr3e-4 --base-run <the base run's name>
+The classifier head (set 9, spec part 18): the net predicts the chance of each placement and
+learns from smoothed placement labels instead of the score itself:
+    ... --head classifier --arm head-classifier --base-run <the base run's name>
 The fast actor (design C, decision log 2026-11-25): each actor plays many hands at once on its
 own net on a GPU, refreshed from the learner every update:
     ... --fast-actor --actors 16 --actor-hands 64 --actor-devices cuda:0,cuda:1 --device cuda:0
@@ -64,7 +67,13 @@ from stacker.dmc import (
     train,
 )
 from stacker.encode import HISTORY_WINDOW
-from stacker.net import DEFAULT_HIDDEN_LAYERS, DEFAULT_HISTORY_HIDDEN, DEFAULT_MLP_WIDTH
+from stacker.net import (
+    DEFAULT_HIDDEN_LAYERS,
+    DEFAULT_HISTORY_HIDDEN,
+    DEFAULT_MLP_WIDTH,
+    HEAD_CLASSIFIER,
+    HEAD_MSE,
+)
 from stacker.sealed import config_name
 
 # Every M3 training run lives under the milestone's slug (manifest: runs/<slug>/<run-name>/).
@@ -195,6 +204,9 @@ def main():
         "--epsilon", type=float, default=EPSILON, help="actors' random-action probability"
     )
     parser.add_argument("--optimizer", choices=OPTIMIZER_CHOICES, default=CONTROL_OPTIMIZER)
+    parser.add_argument(
+        "--head", choices=(HEAD_MSE, HEAD_CLASSIFIER), default=HEAD_MSE, help="net output head"
+    )
     # The fast actor. The two settings default to None so a value given without --fast-actor
     # can be told apart from no value (fast_actor_settings).
     parser.add_argument(
@@ -326,6 +338,10 @@ def main():
     # Writing --heuristic-chair names it for check_against_base below.
     if args.heuristic_chair:
         config["heuristic_chair"] = True
+    # Only a classifier run has this key, so a control config stays as it was before the head
+    # existed and still matches the base runs made then.
+    if args.head == HEAD_CLASSIFIER:
+        config["head"] = HEAD_CLASSIFIER
     if args.base_run is not None:
         base_config_path = RUNS_DIR / args.base_run / "config.json"
         if not base_config_path.exists():
@@ -377,6 +393,8 @@ def main():
         actor_devices=tuple(config.get("actor_devices", [DEFAULT_ACTOR_DEVICES])),
         # Only a chair run's config has the key.
         heuristic_chair=config.get("heuristic_chair", False),
+        # A config without the key is an mse run.
+        head=config.get("head", HEAD_MSE),
     )
 
     # Summary from the log train wrote. The first update's time includes starting the actor

@@ -15,9 +15,13 @@ Loss: an untrained net starts near mean(return^2); only the taken action's Q get
 parameter gets gradient.
 Training: the same seed gives the same losses; eval passes repeat exactly; the net can memorize
 8 decisions.
+Classifier head (set 9, spec part 18): the HL-Gauss labels are the spec's rows; Q is
+2 P(1st) + P(2nd) from the head's own probabilities; the loss reads only the taken action; the
+net fits a batch down to the labels' own entropy, the lowest the loss can go.
 """
 
 import hashlib
+import math
 import random
 
 import pytest
@@ -30,8 +34,11 @@ from stacker.net import (
     DEFAULT_HIDDEN_LAYERS,
     DEFAULT_HISTORY_HIDDEN,
     DEFAULT_MLP_WIDTH,
+    HEAD_CLASSIFIER,
     QNet,
     collate_decisions,
+    hl_gauss_labels,
+    placement_loss,
     q_loss,
 )
 
@@ -74,6 +81,33 @@ DETERMINISM_STEPS = 5
 OVERFIT_STEPS = 200
 OVERFIT_LEARNING_RATE = 1e-3
 OVERFIT_LOSS_CEILING = 1e-3
+# The classifier's labels for returns 0, 1 and 2, as (neither, 2nd, 1st), from spec part 18
+# (sigma 0.75, bins one point wide around 0, 1, 2), rounded to 3 decimals; hence the tolerance.
+HL_GAUSS_ROWS = (
+    (0.663, 0.308, 0.030),
+    (0.241, 0.519, 0.241),
+    (0.030, 0.308, 0.663),
+)
+LABEL_TOLERANCE = 1e-3
+# Made-up logits for the hand-set Q gate, (neither, 2nd, 1st): all three different, so swapping
+# any two classes changes Q.
+HAND_SET_LOGITS = (0.5, -1.0, 1.5)
+# How close the classifier must get to the labels' mean entropy in the overfit gate.
+CLASSIFIER_OVERFIT_GAP = 0.02
+# A 3-decision batch with 2 actions each, for the known-value loss gate: made-up logits
+# [3, 2, 3], one return of each score, and taken columns that are not all the same.
+KNOWN_LOGITS = (
+    ((0.2, -0.4, 1.1), (1.5, 0.3, -0.7)),
+    ((-1.0, 0.8, 0.1), (0.6, 0.6, -0.2)),
+    ((0.9, -0.3, 0.4), (-0.5, 1.2, 0.7)),
+)
+KNOWN_TAKEN = (1, 0, 1)
+KNOWN_RETURNS = (0.0, 1.0, 2.0)
+# Spec part 18's bin edges and sigma, restated here so the expected value does not use the
+# code under test.
+SPEC_EDGES = (-0.5, 0.5, 1.5, 2.5)
+SPEC_SIGMA = 0.75
+KNOWN_LOSS_TOLERANCE = 1e-5
 
 
 def real_decisions(num_players):
@@ -361,3 +395,109 @@ def test_net_can_memorize_eight_decisions(shape):
     # somewhere between its inputs, its output and the loss.
     losses = training_losses(OVERFIT_STEPS, shape)
     assert losses[-1] < OVERFIT_LOSS_CEILING
+
+
+def test_hl_gauss_label_rows():
+    # catches: a wrong sigma, bin edges off by half a bin, or labels not rescaled to sum to 1.
+    labels = hl_gauss_labels(torch.tensor([0.0, 1.0, 2.0]))
+    for row_index in range(len(HL_GAUSS_ROWS)):
+        for class_index in range(len(HL_GAUSS_ROWS[row_index])):
+            expected = HL_GAUSS_ROWS[row_index][class_index]
+            assert abs(labels[row_index, class_index].item() - expected) < LABEL_TOLERANCE
+    assert torch.allclose(labels.sum(dim=1), torch.ones(3))
+
+
+def test_classifier_q_from_hand_set_logits():
+    # catches: the classes in the wrong order, softmax over the actions instead of the classes,
+    # or the action mask dropped.
+    _, batch, _, _ = fixed_batch()
+    torch.manual_seed(DEV_SEED)
+    net = QNet(head=HEAD_CLASSIFIER)
+
+    # With the last layer's weights at 0, every action's logits are its bias: HAND_SET_LOGITS.
+    last_layer = net.mlp[-1]
+    with torch.no_grad():
+        last_layer.weight.zero_()
+        last_layer.bias.copy_(torch.tensor(HAND_SET_LOGITS))
+        q_values = net(*batch)
+
+    # The expected Q, worked out with plain math: softmax, then 2 P(1st) + 1 P(2nd).
+    exponentials = []
+    for logit in HAND_SET_LOGITS:
+        exponentials.append(math.exp(logit))
+    total = sum(exponentials)
+    expected_q = 2 * exponentials[2] / total + exponentials[1] / total
+
+    action_mask = batch[4]
+    real_q = q_values[action_mask]
+    assert torch.allclose(real_q, torch.full_like(real_q, expected_q))
+    assert (q_values[~action_mask] == 0).all()
+
+
+def test_placement_loss_reads_only_the_taken_action():
+    # catches: the gather on the wrong axis, or the taken index ignored.
+    _, batch, taken_index, returns = fixed_batch()
+    action_mask = batch[4]
+    logits = torch.randn(action_mask.shape[0], action_mask.shape[1], 3, requires_grad=True)
+    placement_loss(logits, taken_index, returns).backward()
+
+    # Per action, did any of its three logits get a gradient? [B, K]
+    action_has_gradient = logits.grad.abs().sum(dim=2) > 0
+    taken_cells = torch.zeros_like(action_mask)
+    taken_cells[torch.arange(BATCH_SIZE), taken_index] = True
+    assert torch.equal(action_has_gradient, taken_cells)
+
+
+def test_classifier_fits_a_batch_down_to_the_label_entropy():
+    # catches: a broken path from the logits to the loss, which leaves the loss near ln 3.
+    _, batch, taken_index, returns = fixed_batch()
+    torch.manual_seed(DEV_SEED)
+    net = QNet(head=HEAD_CLASSIFIER)
+    optimizer = torch.optim.Adam(net.parameters(), lr=OVERFIT_LEARNING_RATE)
+    state, history, history_mask, actions, _ = batch
+    for _ in range(OVERFIT_STEPS):
+        loss = placement_loss(
+            net.head_outputs(state, history, history_mask, actions), taken_index, returns
+        )
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    # A smoothed label is never one class, so the lowest loss is its entropy, not 0.
+    labels = hl_gauss_labels(returns)
+    mean_entropy = -(labels * labels.log()).sum(dim=1).mean().item()
+    assert loss.item() - mean_entropy < CLASSIFIER_OVERFIT_GAP
+
+
+def normal_cdf(value):
+    """The standard normal's cumulative probability at value, from the error function."""
+    return 0.5 * (1 + math.erf(value / math.sqrt(2)))
+
+
+def test_placement_loss_matches_a_hand_worked_value():
+    # catches: the loss trained on other labels than HL-Gauss (one-hot, unrenormalized), or a
+    # sum or a mean over the wrong axis.
+    logits = torch.tensor(KNOWN_LOGITS)
+    taken_index = torch.tensor(KNOWN_TAKEN)
+    returns = torch.tensor(KNOWN_RETURNS)
+
+    # The expected loss in plain math: per decision, the label is the normal's mass in each
+    # bin, rescaled to sum to 1; the loss is -sum(label * log softmax(taken logits)).
+    total = 0.0
+    for decision in range(len(KNOWN_TAKEN)):
+        edge_cdf = []
+        for edge in SPEC_EDGES:
+            edge_cdf.append(normal_cdf((edge - KNOWN_RETURNS[decision]) / SPEC_SIGMA))
+        inside_mass = edge_cdf[-1] - edge_cdf[0]
+        taken_logits = KNOWN_LOGITS[decision][KNOWN_TAKEN[decision]]
+        log_normalizer = 0.0
+        for logit in taken_logits:
+            log_normalizer += math.exp(logit)
+        log_normalizer = math.log(log_normalizer)
+        for class_index in range(len(taken_logits)):
+            label = (edge_cdf[class_index + 1] - edge_cdf[class_index]) / inside_mass
+            total -= label * (taken_logits[class_index] - log_normalizer)
+    expected = total / len(KNOWN_TAKEN)
+
+    loss = placement_loss(logits, taken_index, returns).item()
+    assert abs(loss - expected) < KNOWN_LOSS_TOLERANCE

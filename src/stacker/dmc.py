@@ -49,8 +49,11 @@ from stacker.net import (
     DEFAULT_HIDDEN_LAYERS,
     DEFAULT_HISTORY_HIDDEN,
     DEFAULT_MLP_WIDTH,
+    HEAD_CLASSIFIER,
+    HEAD_MSE,
     QNet,
     collate_decisions,
+    placement_loss,
     q_loss,
 )
 
@@ -424,8 +427,9 @@ def learner_step(q_net, optimizer, samples):
     optimizer: a torch optimizer built over q_net.parameters(). Passed in, so the caller picks
       the optimizer and its settings.
     samples: list of B samples from self_play_hand.
-    Returns (loss, gradient_norm), both floats: the mean squared error on this batch before the
-      update, and the length of the gradient before clipping.
+    Returns (loss, gradient_norm), both floats: the loss on this batch before the update (the
+      mean squared error for an mse head, the cross-entropy for a classifier head), and the
+      length of the gradient before clipping.
     The update runs on the device q_net's weights are on (spec part 12, equation 13).
     """
     net_inputs, taken_index, returns = collate_samples(samples)
@@ -446,9 +450,18 @@ def learner_step(q_net, optimizer, samples):
     # gradients readable once the function returns.
     optimizer.zero_grad()
 
-    # Equation 10: Q of each played action against its hand's return.
-    q_values = q_net(*net_inputs)  # [B, 1]
-    loss = q_loss(q_values, taken_index, returns)  # scalar
+    # Equation 10: Q of each played action against its hand's return. A classifier head (spec
+    # part 18, eq. 5') is trained on its three placement logits instead: Q folds them into one
+    # number, which would give the three classes no separate signal.
+    if q_net.head == HEAD_CLASSIFIER:
+        # head_outputs takes every input but the action mask, which comes last. The mask is not
+        # needed: the loss only reads the taken action, which is always a real one.
+        state, history, history_mask, actions, _ = net_inputs
+        logits = q_net.head_outputs(state, history, history_mask, actions)  # [B, 1, 3]
+        loss = placement_loss(logits, taken_index, returns)  # scalar
+    else:
+        q_values = q_net(*net_inputs)  # [B, 1]
+        loss = q_loss(q_values, taken_index, returns)  # scalar
     loss.backward()
 
     # Equation 11: treat all the weights' gradients as one long vector. If it is longer than
@@ -500,20 +513,21 @@ def hand_stream_name(seed, actor_id, hand_index):
     return f"train:{seed}:{actor_id}:{hand_index}"
 
 
-def train_one_process(seed, num_updates, samples_per_update):
+def train_one_process(seed, num_updates, samples_per_update, head=HEAD_MSE):
     """
     Runs the whole training loop in this process: play hands, fill a batch, update, repeat
     (spec parts 7-9). The same seed gives the same result on every run.
     seed: int; fixes the net's starting weights and every hand.
     num_updates: how many learner_step calls to make.
     samples_per_update: batch size B of each update.
+    head: the net's output head, HEAD_MSE (the control) or HEAD_CLASSIFIER (spec part 18).
     Returns a list of num_updates (loss, gradient_norm) pairs, in update order, as learner_step
       gives them.
     """
     # QNet() draws its starting weights from torch's global random stream, so seeding that
     # stream first fixes them.
     torch.manual_seed(seed)
-    q_net = QNet()
+    q_net = QNet(head=head)
     optimizer = torch.optim.RMSprop(
         q_net.parameters(),
         lr=LEARNING_RATE,
@@ -814,6 +828,7 @@ def train(
     actor_hands=FAST_ACTOR_HANDS,
     actor_devices=("cpu",),
     heuristic_chair=False,
+    head=HEAD_MSE,
 ):
     """
     Runs the training loop with actors in their own processes (spec parts 7-9 and 12).
@@ -836,6 +851,8 @@ def train(
     epsilon: probability that an actor plays a random action on a turn with a choice.
     width, hidden_layers, history_hidden: the net's sizes, passed to QNet for both nets.
     history_window: moves of history the actors encode each decision with (0 = none).
+    head: the net's output head, HEAD_MSE or HEAD_CLASSIFIER (spec part 18), for both nets. The
+      actors' nets are copies of these, so they carry it too; learner_step picks the loss from it.
     fast_actor: False runs actor_loop, which plays on one shared CPU net. True runs
       fast_actor_loop (design C, decision log 2026-11-25): each actor scores with its own net
       on one of actor_devices and keeps actor_hands hands in play; the learner writes its new
@@ -862,11 +879,15 @@ def train(
     # stream first fixes them. The net is built on the CPU whatever the device: a GPU has its
     # own random stream, and weights drawn there would differ from the CPU's for the same seed.
     torch.manual_seed(seed)
-    q_net = QNet(width=width, hidden_layers=hidden_layers, history_hidden=history_hidden)
+    q_net = QNet(
+        width=width, hidden_layers=hidden_layers, history_hidden=history_hidden, head=head
+    )
 
     # The actors' net: the same sizes and weights as the learner's, moved to memory that every
     # process can read. Actors get a handle to that memory, not a copy of the weights.
-    actor_net = QNet(width=width, hidden_layers=hidden_layers, history_hidden=history_hidden)
+    actor_net = QNet(
+        width=width, hidden_layers=hidden_layers, history_hidden=history_hidden, head=head
+    )
     actor_net.load_state_dict(q_net.state_dict())
     actor_net.share_memory()
 
